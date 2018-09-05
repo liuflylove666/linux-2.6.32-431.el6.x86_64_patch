@@ -834,14 +834,14 @@ static void ip_vs_proc_conn(struct ip_vs_conn_param *param,  unsigned flags,
 			    const union nf_inet_addr *daddr, __be16 dport,
 			    unsigned long timeout, __u32 fwmark,
 			    struct ip_vs_sync_conn_options *opt,
-			    struct ip_vs_protocol *pp)
+			    struct ip_vs_protocol *pp, int *res_dir)  //change
 {
 	struct ip_vs_dest *dest;
 	struct ip_vs_conn *cp;
 
 
 	if (!(flags & IP_VS_CONN_F_TEMPLATE))
-		cp = ip_vs_conn_in_get(param);
+		cp = ip_vs_conn_get(param, res_dir);  //change
 	else
 		cp = ip_vs_ct_in_get(param);
 
@@ -877,7 +877,7 @@ static void ip_vs_proc_conn(struct ip_vs_conn_param *param,  unsigned flags,
 		dest = ip_vs_find_dest(type, daddr, dport, param->vaddr,
 				       param->vport, protocol, fwmark, flags);
 
-		cp = ip_vs_conn_new(param, daddr, dport, flags, dest, fwmark);
+		cp = ip_vs_conn_new(param, daddr, dport, flags, dest, fwmark, NULL, 0);
 		if (dest)
 			atomic_dec(&dest->refcnt);
 		if (!cp) {
@@ -916,7 +916,7 @@ static void ip_vs_proc_conn(struct ip_vs_conn_param *param,  unsigned flags,
 /*
  *  Process received multicast message for Version 0
  */
-static void ip_vs_process_message_v0(const char *buffer, const size_t buflen)
+static void ip_vs_process_message_v0(const char *buffer, const size_t buflen, int *res_dir)
 {
 	struct ip_vs_sync_mesg_v0 *m = (struct ip_vs_sync_mesg_v0 *)buffer;
 	struct ip_vs_sync_conn_v0 *s;
@@ -981,7 +981,7 @@ static void ip_vs_process_message_v0(const char *buffer, const size_t buflen)
 		/* Send timeout as Zero */
 		ip_vs_proc_conn(&param, flags, state, s->protocol, AF_INET,
 				(union nf_inet_addr *)&s->daddr, s->dport,
-				0, 0, opt, pp);
+				0, 0, opt, pp, res_dir);
 	}
 }
 
@@ -1030,7 +1030,7 @@ static int ip_vs_proc_str(__u8 *p, unsigned int plen, unsigned int *data_len,
 /*
  *   Process a Version 1 sync. connection
  */
-static inline int ip_vs_proc_sync_conn(__u8 *p, __u8 *msg_end)
+static inline int ip_vs_proc_sync_conn(__u8 *p, __u8 *msg_end, int *res_dir)
 {
 	struct ip_vs_sync_conn_options opt;
 	union  ip_vs_sync_conn *s;
@@ -1147,14 +1147,14 @@ static inline int ip_vs_proc_sync_conn(__u8 *p, __u8 *msg_end)
 				(union nf_inet_addr *)&s->v4.daddr, s->v4.dport,
 				ntohl(s->v4.timeout), ntohl(s->v4.fwmark),
 				(opt_flags & IPVS_OPT_F_SEQ_DATA ? &opt : NULL),
-				pp);
+				pp, res_dir);
 #ifdef CONFIG_IP_VS_IPV6
 	else
 		ip_vs_proc_conn(&param, flags, state, s->v6.protocol, af,
 				(union nf_inet_addr *)&s->v6.daddr, s->v6.dport,
 				ntohl(s->v6.timeout), ntohl(s->v6.fwmark),
 				(opt_flags & IPVS_OPT_F_SEQ_DATA ? &opt : NULL),
-				pp);
+				pp, res_dir);
 #endif
 	return 0;
 	/* Error exit */
@@ -1173,6 +1173,7 @@ static void ip_vs_process_message(__u8 *buffer, const size_t buflen)
 	struct ip_vs_sync_mesg *m2 = (struct ip_vs_sync_mesg *)buffer;
 	__u8 *p, *msg_end;
 	int i, nr_conns;
+    int res_dir;
 
 	if (buflen < sizeof(struct ip_vs_sync_mesg_v0)) {
 		IP_VS_DBG(2, "BACKUP, message header too short\n");
@@ -1221,7 +1222,7 @@ static void ip_vs_process_message(__u8 *buffer, const size_t buflen)
 				return;
 			}
 			/* Process a single sync_conn */
-			if ((retc=ip_vs_proc_sync_conn(p, msg_end)) < 0) {
+			if ((retc=ip_vs_proc_sync_conn(p, msg_end, &res_dir)) < 0) {
 				IP_VS_ERR_RL("BACKUP, Dropping buffer, Err: %d in decoding\n",
 					     retc);
 				return;
@@ -1231,7 +1232,7 @@ static void ip_vs_process_message(__u8 *buffer, const size_t buflen)
 		}
 	} else {
 		/* Old type of message */
-		ip_vs_process_message_v0(buffer, buflen);
+		ip_vs_process_message_v0(buffer, buflen, &res_dir);
 		return;
 	}
 }

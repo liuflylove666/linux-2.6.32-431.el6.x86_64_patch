@@ -105,6 +105,7 @@ __u32 secure_tcp_sequence_number(__be32 saddr, __be32 daddr,
 
 	return seq_scale(hash[0]);
 }
+EXPORT_SYMBOL(secure_tcp_sequence_number);
 
 u32 secure_ipv4_port_ephemeral(__be32 saddr, __be32 daddr, __be16 dport)
 {

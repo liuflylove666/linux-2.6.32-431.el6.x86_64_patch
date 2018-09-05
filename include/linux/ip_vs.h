@@ -55,7 +55,9 @@
 #define IP_VS_SO_SET_RESTORE    (IP_VS_BASE_CTL+13)
 #define IP_VS_SO_SET_SAVE       (IP_VS_BASE_CTL+14)
 #define IP_VS_SO_SET_ZERO	(IP_VS_BASE_CTL+15)
-#define IP_VS_SO_SET_MAX	IP_VS_SO_SET_ZERO
+#define IP_VS_SO_SET_ADDLADDR	(IP_VS_BASE_CTL+16)
+#define IP_VS_SO_SET_DELLADDR	(IP_VS_BASE_CTL+17)
+#define IP_VS_SO_SET_MAX	IP_VS_SO_SET_DELLADDR
 
 #define IP_VS_SO_GET_VERSION	IP_VS_BASE_CTL
 #define IP_VS_SO_GET_INFO	(IP_VS_BASE_CTL+1)
@@ -65,7 +67,8 @@
 #define IP_VS_SO_GET_DEST	(IP_VS_BASE_CTL+5)	/* not used now */
 #define IP_VS_SO_GET_TIMEOUT	(IP_VS_BASE_CTL+6)
 #define IP_VS_SO_GET_DAEMON	(IP_VS_BASE_CTL+7)
-#define IP_VS_SO_GET_MAX	IP_VS_SO_GET_DAEMON
+#define IP_VS_SO_GET_LADDRS	(IP_VS_BASE_CTL+8)
+#define IP_VS_SO_GET_MAX	IP_VS_SO_GET_LADDRS
 
 
 /*
@@ -78,6 +81,7 @@
 #define IP_VS_CONN_F_TUNNEL	0x0002		/* tunneling */
 #define IP_VS_CONN_F_DROUTE	0x0003		/* direct routing */
 #define IP_VS_CONN_F_BYPASS	0x0004		/* cache bypass */
+#define IP_VS_CONN_F_FULLNAT	0x0005	/* full nat */
 #define IP_VS_CONN_F_SYNC	0x0020		/* entry created by sync */
 #define IP_VS_CONN_F_HASHED	0x0040		/* hashed entry */
 #define IP_VS_CONN_F_NOOUTPUT	0x0080		/* no output packets */
@@ -88,6 +92,8 @@
 #define IP_VS_CONN_F_NO_CPORT	0x0800		/* no client port set yet */
 #define IP_VS_CONN_F_TEMPLATE	0x1000		/* template, not connection */
 #define IP_VS_CONN_F_ONE_PACKET	0x2000		/* forward only one packet */
+#define IP_VS_CONN_F_CIP_INSERTED 0x4000	/* client ip address has inserted */
+#define IP_VS_CONN_F_SYNPROXY	0x8000	    /* syn proxy flag */
 
 /* Initial bits allowed in backup server */
 #define IP_VS_CONN_F_BACKUP_MASK (IP_VS_CONN_F_FWD_MASK | \
@@ -148,15 +154,19 @@ struct ip_vs_dest_user {
 	__u32		l_threshold;	/* lower threshold */
 };
 
+struct ip_vs_laddr_user {
+	__be32      addr;		    /* ipv4 address */
+};
+
 
 /*
  *	IPVS statistics object (for user space)
  */
 struct ip_vs_stats_user
 {
-	__u32                   conns;          /* connections scheduled */
-	__u32                   inpkts;         /* incoming packets */
-	__u32                   outpkts;        /* outgoing packets */
+	__u64                   conns;          /* connections scheduled */
+	__u64                   inpkts;         /* incoming packets */
+	__u64                   outpkts;        /* outgoing packets */
 	__u64                   inbytes;        /* incoming bytes */
 	__u64                   outbytes;       /* outgoing bytes */
 
@@ -198,6 +208,9 @@ struct ip_vs_service_entry {
 	/* number of real servers */
 	unsigned int		num_dests;
 
+    /* number of local address */
+	unsigned int 		num_laddrs;
+
 	/* statistics */
 	struct ip_vs_stats_user stats;
 };
@@ -221,6 +234,14 @@ struct ip_vs_dest_entry {
 };
 
 
+struct ip_vs_laddr_entry {
+	__be32 addr;		/* ipv4 address */
+
+	__u64 port_conflict;	/* conflict counts */
+	__u32 conn_counts;	/* current connects */
+};
+
+
 /* The argument to IP_VS_SO_GET_DESTS */
 struct ip_vs_get_dests {
 	/* which service: user fills in these */
@@ -234,6 +255,22 @@ struct ip_vs_get_dests {
 
 	/* the real servers */
 	struct ip_vs_dest_entry	entrytable[0];
+};
+
+
+/* The argument to IP_VS_SO_GET_LADDRS */
+struct ip_vs_get_laddrs {
+	/* which service: user fills in these */
+	__u16 protocol;
+	__be32 addr;		/* virtual address */
+	__be16 port;
+	__u32 fwmark;		/* firwall mark of service */
+
+	/* number of local address */
+	unsigned int num_laddrs;
+
+	/* the real servers */
+	struct ip_vs_laddr_entry entrytable[0];
 };
 
 
@@ -310,6 +347,10 @@ enum {
 	IPVS_CMD_ZERO,			/* zero all counters and stats */
 	IPVS_CMD_FLUSH,			/* flush services and dests */
 
+	IPVS_CMD_NEW_LADDR,		/* add local address */
+	IPVS_CMD_DEL_LADDR,		/* del local address */
+	IPVS_CMD_GET_LADDR,		/* dump local address */
+
 	__IPVS_CMD_MAX,
 };
 
@@ -324,6 +365,7 @@ enum {
 	IPVS_CMD_ATTR_TIMEOUT_TCP,	/* TCP connection timeout */
 	IPVS_CMD_ATTR_TIMEOUT_TCP_FIN,	/* TCP FIN wait timeout */
 	IPVS_CMD_ATTR_TIMEOUT_UDP,	/* UDP timeout */
+	IPVS_CMD_ATTR_LADDR,	/* nested local address attribute */
 	__IPVS_CMD_ATTR_MAX,
 };
 
@@ -381,6 +423,26 @@ enum {
 };
 
 #define IPVS_DEST_ATTR_MAX (__IPVS_DEST_ATTR_MAX - 1)
+
+
+
+
+/*
+ *  Attirbutes used to describe a local address
+ *  
+ */
+
+enum {
+	IPVS_LADDR_ATTR_UNSPEC = 0,
+	IPVS_LADDR_ATTR_ADDR,
+	IPVS_LADDR_ATTR_PORT_CONFLICT,
+	IPVS_LADDR_ATTR_CONN_COUNTS,
+	__IPVS_LADDR_ATTR_MAX,
+};
+
+#define IPVS_LADDR_ATTR_MAX (__IPVS_LADDR_ATTR_MAX - 1)
+
+
 
 /*
  * Attributes describing a sync daemon

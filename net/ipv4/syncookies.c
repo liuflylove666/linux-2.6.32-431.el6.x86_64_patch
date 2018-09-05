@@ -17,6 +17,7 @@
 #include <linux/kernel.h>
 #include <net/tcp.h>
 #include <net/route.h>
+#include <net/ip_vs_synproxy.h>
 
 /* Timestamps: lowest 9 bits store TCP options */
 #define TSBITS 9
@@ -367,3 +368,91 @@ struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb,
 	ret = get_cookie_sock(sk, skb, req, &rt->u.dst);
 out:	return ret;
 }
+
+
+
+/*
+ * Generate a syncookie for ip_vs module. 
+ * Besides mss, we store additional tcp options in cookie "data".
+ * 
+ * Cookie "data" format: 
+ * |[21][20][19-16][15-0]|
+ * [21] SACKOK
+ * [20] TimeStampOK
+ * [19-16] snd_wscale
+ * [15-0] MSSIND 
+ */
+__u32 ip_vs_synproxy_cookie_v4_init_sequence(struct sk_buff *skb, 
+                                            struct ip_vs_synproxy_opt *opts) 
+{
+       const struct iphdr *iph = ip_hdr(skb);
+       const struct tcphdr *th = tcp_hdr(skb);
+       int mssind;
+       const __u16 mss = opts->mss_clamp;
+       __u32 data = 0;
+
+       /* XXX sort msstab[] by probability?  Binary search? */
+       for (mssind = 0; mss > msstab[mssind + 1]; mssind++)
+               ;
+       opts->mss_clamp = msstab[mssind] + 1;
+
+       data = mssind & IP_VS_SYNPROXY_MSS_MASK;
+       data |= opts->sack_ok << IP_VS_SYNPROXY_SACKOK_BIT;
+       data |= opts->tstamp_ok << IP_VS_SYNPROXY_TSOK_BIT;
+       data |= ((opts->snd_wscale & 0x0f) << IP_VS_SYNPROXY_SND_WSCALE_BITS);
+
+       return secure_tcp_syn_cookie(iph->saddr, iph->daddr,
+                                    th->source, th->dest, ntohl(th->seq),
+                                    jiffies / (HZ * 60), data);
+}
+EXPORT_SYMBOL(ip_vs_synproxy_cookie_v4_init_sequence);
+
+
+/*
+ * when ip_vs_synproxy_cookie_v4_init_sequence is used, we check
+ * cookie as follow:
+ *  1. mssind check.
+ *  2. get sack/timestamp/wscale options.
+ */
+int ip_vs_synproxy_v4_cookie_check(struct sk_buff * skb, __u32 cookie, 
+                             struct ip_vs_synproxy_opt * opt) 
+{
+       const struct iphdr *iph = ip_hdr(skb);
+       const struct tcphdr *th = tcp_hdr(skb);
+       __u32 seq = ntohl(th->seq) - 1;
+       __u32 mssind;
+       int   ret = 0;
+       __u32 res = check_tcp_syn_cookie(cookie, iph->saddr, iph->daddr,
+                                        th->source, th->dest, seq,
+                                        jiffies / (HZ * 60),
+                                        COUNTER_TRIES);
+
+       if(res == (__u32)-1) /* count is invalid, jiffies' >> jiffies */
+               goto out;
+
+       mssind = res & IP_VS_SYNPROXY_MSS_MASK;
+
+       memset(opt, 0, sizeof(struct ip_vs_synproxy_opt));
+
+       if (mssind < NUM_MSS) {
+               opt->mss_clamp = msstab[mssind] + 1;
+               opt->sack_ok = (res & IP_VS_SYNPROXY_SACKOK_MASK) >> 
+                                       IP_VS_SYNPROXY_SACKOK_BIT;
+               opt->tstamp_ok = (res & IP_VS_SYNPROXY_TSOK_MASK) >> 
+                                       IP_VS_SYNPROXY_TSOK_BIT;
+               opt->snd_wscale = (res & IP_VS_SYNPROXY_SND_WSCALE_MASK) >> 
+                                       IP_VS_SYNPROXY_SND_WSCALE_BITS;
+                if (opt->snd_wscale > 0 && 
+                   opt->snd_wscale <= IP_VS_SYNPROXY_WSCALE_MAX)
+                        opt->wscale_ok = 1;
+                else if (opt->snd_wscale == 0)
+                        opt->wscale_ok = 0;
+                else
+                        goto out;
+
+               ret = 1;
+       }
+
+out:   return ret;
+}
+EXPORT_SYMBOL(ip_vs_synproxy_v4_cookie_check);

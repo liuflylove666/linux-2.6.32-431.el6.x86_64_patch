@@ -59,10 +59,10 @@ static void estimation_timer(unsigned long arg)
 {
 	struct ip_vs_estimator *e;
 	struct ip_vs_stats *s;
-	u32 n_conns;
-	u32 n_inpkts, n_outpkts;
+	u64 n_conns;
+	u64 n_inpkts, n_outpkts;
 	u64 n_inbytes, n_outbytes;
-	u32 rate;
+	u64 rate;
 
 	spin_lock(&est_lock);
 	list_for_each_entry(e, &est_list, list) {
@@ -122,10 +122,10 @@ void ip_vs_new_estimator(struct ip_vs_stats *stats)
 	est->outpps = stats->ustats.outpps<<10;
 
 	est->last_inbytes = stats->ustats.inbytes;
-	est->inbps = stats->ustats.inbps<<5;
+	est->inbps = (u64)(stats->ustats.inbps)<<5;
 
 	est->last_outbytes = stats->ustats.outbytes;
-	est->outbps = stats->ustats.outbps<<5;
+	est->outbps = (u64)(stats->ustats.outbps)<<5;
 
 	spin_lock_bh(&est_lock);
 	list_add(&est->list, &est_list);

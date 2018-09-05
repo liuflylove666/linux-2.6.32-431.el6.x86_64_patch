@@ -49,6 +49,7 @@
 #include <asm/uaccess.h>
 
 #include <net/ip_vs.h>
+#include <net/ip_vs_synproxy.h>
 
 /* semaphore for IPVS sockopts. And, [gs]etsockopt may sleep. */
 static DEFINE_MUTEX(__ip_vs_mutex);
@@ -88,6 +89,71 @@ int sysctl_ip_vs_expire_quiescent_template = 0;
 int sysctl_ip_vs_sync_threshold[2] = { DEFAULT_SYNC_THRESHOLD,
 				       DEFAULT_SYNC_PERIOD };
 int sysctl_ip_vs_nat_icmp_send = 0;
+
+
+/*
+ * sysctl for FULLNAT
+ */
+int sysctl_ip_vs_timestamp_remove_entry = 1;
+int sysctl_ip_vs_mss_adjust_entry = 1;
+int sysctl_ip_vs_conn_reused_entry = 1;
+int sysctl_ip_vs_toa_entry = 1;
+static int ip_vs_entry_min = 0;
+static int ip_vs_entry_max = 1;
+extern int sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_LAST + 1];
+/*
+ * sysctl for SYNPROXY
+ */
+/* syn-proxy sysctl variables */
+int sysctl_ip_vs_synproxy_init_mss = IP_VS_SYNPROXY_INIT_MSS_DEFAULT;
+int sysctl_ip_vs_synproxy_sack = IP_VS_SYNPROXY_SACK_DEFAULT;
+int sysctl_ip_vs_synproxy_wscale = IP_VS_SYNPROXY_WSCALE_DEFAULT;
+int sysctl_ip_vs_synproxy_timestamp = IP_VS_SYNPROXY_TIMESTAMP_DEFAULT;
+int sysctl_ip_vs_synproxy_synack_ttl = IP_VS_SYNPROXY_TTL_DEFAULT;
+int sysctl_ip_vs_synproxy_defer = IP_VS_SYNPROXY_DEFER_DEFAULT;
+int sysctl_ip_vs_synproxy_conn_reuse = IP_VS_SYNPROXY_CONN_REUSE_DEFAULT;
+int sysctl_ip_vs_synproxy_conn_reuse_cl = IP_VS_SYNPROXY_CONN_REUSE_CL_DEFAULT;
+int sysctl_ip_vs_synproxy_conn_reuse_tw = IP_VS_SYNPROXY_CONN_REUSE_TW_DEFAULT;
+int sysctl_ip_vs_synproxy_conn_reuse_fw = IP_VS_SYNPROXY_CONN_REUSE_FW_DEFAULT;
+int sysctl_ip_vs_synproxy_conn_reuse_cw = IP_VS_SYNPROXY_CONN_REUSE_CW_DEFAULT;
+int sysctl_ip_vs_synproxy_conn_reuse_la = IP_VS_SYNPROXY_CONN_REUSE_LA_DEFAULT;
+int sysctl_ip_vs_synproxy_dup_ack_thresh = IP_VS_SYNPROXY_DUP_ACK_DEFAULT;
+int sysctl_ip_vs_synproxy_skb_store_thresh = IP_VS_SYNPROXY_SKB_STORE_DEFAULT;
+int sysctl_ip_vs_synproxy_syn_retry = IP_VS_SYNPROXY_SYN_RETRY_DEFAULT;
+
+static int ip_vs_synproxy_switch_min = 0;
+static int ip_vs_synproxy_switch_max = 1;
+static int ip_vs_synproxy_wscale_min = 0;
+static int ip_vs_synproxy_wscale_max = IP_VS_SYNPROXY_WSCALE_MAX;
+static int ip_vs_synproxy_init_mss_min = 0;
+static int ip_vs_synproxy_init_mss_max = 65535;
+static int ip_vs_synproxy_synack_ttl_min = IP_VS_SYNPROXY_TTL_MIN;
+static int ip_vs_synproxy_synack_ttl_max = IP_VS_SYNPROXY_TTL_MAX;
+static int ip_vs_synproxy_dup_ack_cnt_min = 0;
+static int ip_vs_synproxy_dup_ack_cnt_max = 65535;
+static int ip_vs_synproxy_syn_retry_min = 0;
+static int ip_vs_synproxy_syn_retry_max = 6;
+static int ip_vs_synproxy_skb_store_thresh_min = 0;
+static int ip_vs_synproxy_skb_store_thresh_max = 5;
+/* local address port range */
+int sysctl_ip_vs_lport_max = 65535;
+int sysctl_ip_vs_lport_min = 5000;
+int sysctl_ip_vs_lport_tries = 10000;
+static int ip_vs_port_min = 1025;
+static int ip_vs_port_max = 65535;
+static int ip_vs_port_try_min = 10;
+static int ip_vs_port_try_max = 60000;
+/*
+ * sysctl for DEFENCE ATTACK
+ */
+int sysctl_ip_vs_frag_drop_entry = 1;
+int sysctl_ip_vs_tcp_drop_entry = 1;
+int sysctl_ip_vs_udp_drop_entry = 1;
+/* send rst when tcp session expire */
+int sysctl_ip_vs_conn_expire_tcp_rst = 1;
+
+
+
 int sysctl_ip_vs_snat_reroute = 1;
 int sysctl_ip_vs_sync_ver = 1;		/* Default version of sync proto */
 int sysctl_ip_vs_sync_qlen_max; /* init in ip_vs_control_init() */
@@ -316,10 +382,8 @@ static atomic_t ip_vs_nullsvc_counter = ATOMIC_INIT(0);
  *	Returns hash value for virtual service
  */
 static __inline__ unsigned
-ip_vs_svc_hashkey(int af, unsigned proto, const union nf_inet_addr *addr,
-		  __be16 port)
+ip_vs_svc_hashkey(int af, unsigned proto, const union nf_inet_addr *addr)
 {
-	register unsigned porth = ntohs(port);
 	__be32 addr_fold = addr->ip;
 
 #ifdef CONFIG_IP_VS_IPV6
@@ -328,8 +392,8 @@ ip_vs_svc_hashkey(int af, unsigned proto, const union nf_inet_addr *addr,
 			    addr->ip6[2]^addr->ip6[3];
 #endif
 
-	return (proto^ntohl(addr_fold)^(porth>>IP_VS_SVC_TAB_BITS)^porth)
-		& IP_VS_SVC_TAB_MASK;
+	return (proto^ntohl(addr_fold)) 
+	    & IP_VS_SVC_TAB_MASK;
 }
 
 /*
@@ -359,8 +423,7 @@ static int ip_vs_svc_hash(struct ip_vs_service *svc)
 		/*
 		 *  Hash it by <protocol,addr,port> in ip_vs_svc_table
 		 */
-		hash = ip_vs_svc_hashkey(svc->af, svc->protocol, &svc->addr,
-					 svc->port);
+		hash = ip_vs_svc_hashkey(svc->af, svc->protocol, &svc->addr);
 		list_add(&svc->s_list, &ip_vs_svc_table[hash]);
 	} else {
 		/*
@@ -414,7 +477,7 @@ __ip_vs_service_get(int af, __u16 protocol, const union nf_inet_addr *vaddr,
 	struct ip_vs_service *svc;
 
 	/* Check for "full" addressed entries */
-	hash = ip_vs_svc_hashkey(af, protocol, vaddr, vport);
+	hash = ip_vs_svc_hashkey(af, protocol, vaddr);
 
 	list_for_each_entry(svc, &ip_vs_svc_table[hash], s_list){
 		if ((svc->af == af)
@@ -502,6 +565,30 @@ ip_vs_service_get(int af, __u32 fwmark, __u16 protocol,
 		      svc ? "hit" : "not hit");
 
 	return svc;
+}
+
+
+struct ip_vs_service *ip_vs_lookup_vip(int af, __u16 protocol,
+				       const union nf_inet_addr *vaddr)
+{
+	struct ip_vs_service *svc;
+	unsigned hash;
+
+	read_lock(&__ip_vs_svc_lock);
+
+	hash = ip_vs_svc_hashkey(af, protocol, vaddr);
+	list_for_each_entry(svc, &ip_vs_svc_table[hash], s_list) {
+		if ((svc->af == af)
+		    && ip_vs_addr_equal(af, &svc->addr, vaddr)
+		    && (svc->protocol == protocol)) {
+			/* HIT */
+			read_unlock(&__ip_vs_svc_lock);
+			return svc;
+		}
+	}
+
+	read_unlock(&__ip_vs_svc_lock);
+	return NULL;
 }
 
 
@@ -1161,6 +1248,170 @@ ip_vs_del_dest(struct ip_vs_service *svc, struct ip_vs_dest_user_kern *udest)
 }
 
 
+
+void ip_vs_laddr_hold(struct ip_vs_laddr *laddr)
+{
+	atomic_inc(&laddr->refcnt);
+}
+
+void ip_vs_laddr_put(struct ip_vs_laddr *laddr)
+{
+	if (atomic_dec_and_test(&laddr->refcnt)) {
+		kfree(laddr);
+	}
+}
+
+static int
+ip_vs_new_laddr(struct ip_vs_service *svc, struct ip_vs_laddr_user_kern *uladdr,
+		struct ip_vs_laddr **laddr_p)
+{
+	struct ip_vs_laddr *laddr;
+
+	laddr = kzalloc(sizeof(struct ip_vs_laddr), GFP_ATOMIC);
+	if (!laddr) {
+		pr_err("%s(): no memory.\n", __func__);
+		return -ENOMEM;
+	}
+
+	laddr->af = svc->af;
+	ip_vs_addr_copy(svc->af, &laddr->addr, &uladdr->addr);
+	atomic64_set(&laddr->port_conflict, 0);
+	atomic64_set(&laddr->port, 0);
+	atomic_set(&laddr->refcnt, 0);
+	atomic_set(&laddr->conn_counts, 0);
+
+	*laddr_p = laddr;
+
+	return 0;
+}
+
+static struct ip_vs_laddr *ip_vs_lookup_laddr(struct ip_vs_service *svc,
+					      const union nf_inet_addr *addr)
+{
+	struct ip_vs_laddr *laddr;
+
+	/*
+	 * Find the local address for the given service
+	 */
+	list_for_each_entry(laddr, &svc->laddr_list, n_list) {
+		if ((laddr->af == svc->af)
+		    && ip_vs_addr_equal(svc->af, &laddr->addr, addr)) {
+			/* HIT */
+			return laddr;
+		}
+	}
+
+	return NULL;
+}
+
+static int
+ip_vs_add_laddr(struct ip_vs_service *svc, struct ip_vs_laddr_user_kern *uladdr)
+{
+	struct ip_vs_laddr *laddr;
+	int ret;
+
+	IP_VS_DBG_BUF(0, "vip %s:%d add local address %s\n",
+		      IP_VS_DBG_ADDR(svc->af, &svc->addr), ntohs(svc->port),
+		      IP_VS_DBG_ADDR(svc->af, &uladdr->addr));
+
+	/*
+	 * Check if the local address already exists in the list
+	 */
+	laddr = ip_vs_lookup_laddr(svc, &uladdr->addr);
+	if (laddr) {
+		IP_VS_DBG(1, "%s(): local address already exists\n", __func__);
+		return -EEXIST;
+	}
+
+	/*
+	 * Allocate and initialize the dest structure
+	 */
+	ret = ip_vs_new_laddr(svc, uladdr, &laddr);
+	if (ret) {
+		return ret;
+	}
+
+	/*
+	 * Add the local adress entry into the list
+	 */
+	ip_vs_laddr_hold(laddr);
+
+	write_lock_bh(&__ip_vs_svc_lock);
+
+	/*
+	 * Wait until all other svc users go away.
+	 */
+	IP_VS_WAIT_WHILE(atomic_read(&svc->usecnt) > 1);
+
+	list_add_tail(&laddr->n_list, &svc->laddr_list);
+	svc->num_laddrs++;
+
+#ifdef CONFIG_IP_VS_DEBUG
+	/* Dump the destinations */
+	IP_VS_DBG_BUF(0, "		svc %s:%d num %d curr %p \n",
+		      IP_VS_DBG_ADDR(svc->af, &svc->addr),
+		      ntohs(svc->port), svc->num_laddrs, svc->curr_laddr);
+	list_for_each_entry(laddr, &svc->laddr_list, n_list) {
+		IP_VS_DBG_BUF(0, "		laddr %p %s:%d \n",
+			      laddr, IP_VS_DBG_ADDR(svc->af, &laddr->addr), 0);
+	}
+#endif
+
+	write_unlock_bh(&__ip_vs_svc_lock);
+
+	return 0;
+}
+
+static int
+ip_vs_del_laddr(struct ip_vs_service *svc, struct ip_vs_laddr_user_kern *uladdr)
+{
+	struct ip_vs_laddr *laddr;
+
+	IP_VS_DBG_BUF(0, "vip %s:%d del local address %s\n",
+		      IP_VS_DBG_ADDR(svc->af, &svc->addr), ntohs(svc->port),
+		      IP_VS_DBG_ADDR(svc->af, &uladdr->addr));
+
+	laddr = ip_vs_lookup_laddr(svc, &uladdr->addr);
+
+	if (laddr == NULL) {
+		IP_VS_DBG(1, "%s(): local address not found!\n", __func__);
+		return -ENOENT;
+	}
+
+	write_lock_bh(&__ip_vs_svc_lock);
+
+	/*
+	 *      Wait until all other svc users go away.
+	 */
+	IP_VS_WAIT_WHILE(atomic_read(&svc->usecnt) > 1);
+
+	/* update svc->curr_laddr */
+	if (svc->curr_laddr == &laddr->n_list)
+		svc->curr_laddr = laddr->n_list.next;
+	/*
+	 *      Unlink dest from the service
+	 */
+	list_del(&laddr->n_list);
+	svc->num_laddrs--;
+
+#ifdef CONFIG_IP_VS_DEBUG
+	IP_VS_DBG_BUF(0, "	svc %s:%d num %d curr %p \n",
+		      IP_VS_DBG_ADDR(svc->af, &svc->addr),
+		      ntohs(svc->port), svc->num_laddrs, svc->curr_laddr);
+	list_for_each_entry(laddr, &svc->laddr_list, n_list) {
+		IP_VS_DBG_BUF(0, "		laddr %p %s:%d \n",
+			      laddr, IP_VS_DBG_ADDR(svc->af, &laddr->addr), 0);
+	}
+#endif
+
+	ip_vs_laddr_put(laddr);
+
+	write_unlock_bh(&__ip_vs_svc_lock);
+
+	return 0;
+}
+
+
 /*
  *	Add a service into the service hash table
  */
@@ -1220,6 +1471,14 @@ ip_vs_add_service(struct ip_vs_service_user_kern *u,
 	svc->flags = u->flags;
 	svc->timeout = u->timeout * HZ;
 	svc->netmask = u->netmask;
+
+
+	/* Init the local address stuff */
+	rwlock_init(&svc->laddr_lock);
+	INIT_LIST_HEAD(&svc->laddr_list);
+	svc->num_laddrs = 0;
+	svc->curr_laddr = &svc->laddr_list;
+
 
 	INIT_LIST_HEAD(&svc->destinations);
 	rwlock_init(&svc->sched_lock);
@@ -1380,6 +1639,7 @@ ip_vs_edit_service(struct ip_vs_service *svc, struct ip_vs_service_user_kern *u)
 static void __ip_vs_del_service(struct ip_vs_service *svc)
 {
 	struct ip_vs_dest *dest, *nxt;
+	struct ip_vs_laddr *laddr, *laddr_next;
 	struct ip_vs_scheduler *old_sched;
 	struct ip_vs_pe *old_pe;
 
@@ -1405,6 +1665,12 @@ static void __ip_vs_del_service(struct ip_vs_service *svc)
 	if (svc->inc) {
 		ip_vs_app_inc_put(svc->inc);
 		svc->inc = NULL;
+	}
+
+	/* Unlink the whole local address list */
+	list_for_each_entry_safe(laddr, laddr_next, &svc->laddr_list, n_list) {
+		list_del(&laddr->n_list);
+		ip_vs_laddr_put(laddr);
 	}
 
 	/*
@@ -1663,92 +1929,76 @@ static struct ctl_table vs_vars[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_do_sync_mode,
 	},
-#if 0
 	{
 		.procname	= "timeout_established",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_ESTABLISHED],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_ESTABLISHED],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_synsent",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_SYN_SENT],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_SYN_SENT],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_synrecv",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_SYN_RECV],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_SYN_RECV],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_finwait",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_FIN_WAIT],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_FIN_WAIT],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_timewait",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_TIME_WAIT],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_TIME_WAIT],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_close",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_CLOSE],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_CLOSE],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_closewait",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_CLOSE_WAIT],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_CLOSE_WAIT],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_lastack",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_LAST_ACK],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_CLOSE_WAIT],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_listen",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_LISTEN],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_LISTEN],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
 	{
 		.procname	= "timeout_synack",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_SYNACK],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_SYNACK],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
-	{
-		.procname	= "timeout_udp",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_UDP],
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
-	},
-	{
-		.procname	= "timeout_icmp",
-		.data	= &vs_timeout_table_dos.timeout[IP_VS_S_ICMP],
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
-	},
-#endif
 	{
 		.procname	= "sync_qlen_max",
 		.data		= &sysctl_ip_vs_sync_qlen_max,
@@ -1814,6 +2064,269 @@ static struct ctl_table vs_vars[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+   {
+    .procname = "fullnat_timestamp_remove_entry",
+    .data = &sysctl_ip_vs_timestamp_remove_entry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,
+    .extra2 = &ip_vs_entry_max,
+    },
+   {
+    .procname = "fullnat_mss_adjust_entry",
+    .data = &sysctl_ip_vs_mss_adjust_entry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,
+    .extra2 = &ip_vs_entry_max,
+    },
+   {
+    .procname = "fullnat_conn_reused_entry",
+    .data = &sysctl_ip_vs_conn_reused_entry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,
+    .extra2 = &ip_vs_entry_max,
+    },
+   {
+    .procname = "fullnat_toa_entry",
+    .data = &sysctl_ip_vs_toa_entry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,
+    .extra2 = &ip_vs_entry_max,
+    },
+   {
+    .procname = "fullnat_lport_max",
+    .data = &sysctl_ip_vs_lport_max,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_port_min,
+    .extra2 = &ip_vs_port_max,
+    },
+   {
+    .procname = "fullnat_lport_min",
+    .data = &sysctl_ip_vs_lport_min,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_port_min,
+    .extra2 = &ip_vs_port_max,
+    },
+   {
+    .procname = "fullnat_lport_tries",
+    .data = &sysctl_ip_vs_lport_tries,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_port_try_min,
+    .extra2 = &ip_vs_port_try_max,
+    },
+   /* syn-proxy sysctl variables */
+   {
+    .procname = "synproxy_init_mss",
+    .data = &sysctl_ip_vs_synproxy_init_mss,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_init_mss_min,
+    .extra2 = &ip_vs_synproxy_init_mss_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_sack",
+    .data = &sysctl_ip_vs_synproxy_sack,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_wscale",
+    .data = &sysctl_ip_vs_synproxy_wscale,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_wscale_min,
+    .extra2 = &ip_vs_synproxy_wscale_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_timestamp",
+    .data = &sysctl_ip_vs_synproxy_timestamp,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_synack_ttl",
+    .data = &sysctl_ip_vs_synproxy_synack_ttl,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_synack_ttl_min,
+    .extra2 = &ip_vs_synproxy_synack_ttl_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_defer",
+    .data = &sysctl_ip_vs_synproxy_defer,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_conn_reuse",
+    .data = &sysctl_ip_vs_synproxy_conn_reuse,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_conn_reuse_close",
+    .data = &sysctl_ip_vs_synproxy_conn_reuse_cl,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_conn_reuse_time_wait",
+    .data = &sysctl_ip_vs_synproxy_conn_reuse_tw,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_conn_reuse_fin_wait",
+    .data = &sysctl_ip_vs_synproxy_conn_reuse_fw,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_conn_reuse_close_wait",
+    .data = &sysctl_ip_vs_synproxy_conn_reuse_cw,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_conn_reuse_last_ack",
+    .data = &sysctl_ip_vs_synproxy_conn_reuse_la,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_switch_min,
+    .extra2 = &ip_vs_synproxy_switch_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_ack_skb_store_thresh",
+    .data = &sysctl_ip_vs_synproxy_skb_store_thresh,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_skb_store_thresh_min,
+    .extra2 = &ip_vs_synproxy_skb_store_thresh_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_ack_storm_thresh",
+    .data = &sysctl_ip_vs_synproxy_dup_ack_thresh,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_dup_ack_cnt_min,
+    .extra2 = &ip_vs_synproxy_dup_ack_cnt_max,
+    .strategy = &sysctl_intvec,
+    },
+   {
+    .procname = "synproxy_syn_retry",
+    .data = &sysctl_ip_vs_synproxy_syn_retry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .extra1 = &ip_vs_synproxy_syn_retry_min,
+    .extra2 = &ip_vs_synproxy_syn_retry_max,
+    .strategy = &sysctl_intvec,
+    },
+   /* attack-defence sysctl variables */
+   {
+    .procname = "defence_tcp_drop",
+    .data = &sysctl_ip_vs_tcp_drop_entry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,
+    .extra2 = &ip_vs_entry_max,
+    },
+   {
+    .procname = "defence_udp_drop",
+    .data = &sysctl_ip_vs_udp_drop_entry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,
+    .extra2 = &ip_vs_entry_max,
+    },
+   {
+    .procname = "defence_frag_drop",
+    .data = &sysctl_ip_vs_frag_drop_entry,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,
+    .extra2 = &ip_vs_entry_max,
+    },
+   /* send rst sysctl variables */
+   {
+    .procname = "conn_expire_tcp_rst",
+    .data = &sysctl_ip_vs_conn_expire_tcp_rst,
+    .maxlen = sizeof(int),
+    .mode = 0644,
+    .proc_handler = &proc_dointvec_minmax,
+    .strategy = &sysctl_intvec,
+    .extra1 = &ip_vs_entry_min,    /* zero */
+    .extra2 = &ip_vs_entry_max,    /* one */
+    },
 	{ .ctl_name = 0 }
 };
 
@@ -1847,6 +2360,8 @@ static inline const char *ip_vs_fwd_name(unsigned flags)
 		return "Tunnel";
 	case IP_VS_CONN_F_DROUTE:
 		return "Route";
+	case IP_VS_CONN_F_FULLNAT:
+		return "FullNat";
 	default:
 		return "Masq";
 	}
@@ -2058,7 +2573,7 @@ static int ip_vs_stats_show(struct seq_file *seq, void *v)
 		   "   Conns  Packets  Packets            Bytes            Bytes\n");
 
 	spin_lock_bh(&ip_vs_stats.lock);
-	seq_printf(seq, "%8X %8X %8X %16LX %16LX\n\n", ip_vs_stats.ustats.conns,
+	seq_printf(seq, "%16LX %16LX %16LX %16LX %16LX\n\n", ip_vs_stats.ustats.conns,
 		   ip_vs_stats.ustats.inpkts, ip_vs_stats.ustats.outpkts,
 		   (unsigned long long) ip_vs_stats.ustats.inbytes,
 		   (unsigned long long) ip_vs_stats.ustats.outbytes);
@@ -2091,6 +2606,102 @@ static const struct file_operations ip_vs_stats_fops = {
 };
 
 #endif
+
+
+#ifdef CONFIG_PROC_FS
+/*
+ * Statistics for FULLNAT and SYNPROXY
+ * in /proc/net/ip_vs_ext_stats
+ */
+
+struct ip_vs_estats_mib *ip_vs_esmib;
+
+static struct ip_vs_estats_entry ext_stats[] = {
+	IP_VS_ESTATS_ITEM("fullnat_add_toa_ok", FULLNAT_ADD_TOA_OK),
+	IP_VS_ESTATS_ITEM("fullnat_add_toa_fail_len", FULLNAT_ADD_TOA_FAIL_LEN),
+	IP_VS_ESTATS_ITEM("fullnat_add_toa_fail_mem", FULLNAT_ADD_TOA_FAIL_MEM),
+	IP_VS_ESTATS_ITEM("fullnat_add_toa_fail_proto",
+			  FULLNAT_ADD_TOA_FAIL_PROTO),
+	IP_VS_ESTATS_ITEM("fullnat_conn_reused", FULLNAT_CONN_REUSED),
+	IP_VS_ESTATS_ITEM("fullnat_conn_reused_close",
+			  FULLNAT_CONN_REUSED_CLOSE),
+	IP_VS_ESTATS_ITEM("fullnat_conn_reused_timewait",
+			  FULLNAT_CONN_REUSED_TIMEWAIT),
+	IP_VS_ESTATS_ITEM("fullnat_conn_reused_finwait",
+			  FULLNAT_CONN_REUSED_FINWAIT),
+	IP_VS_ESTATS_ITEM("fullnat_conn_reused_closewait",
+			  FULLNAT_CONN_REUSED_CLOSEWAIT),
+	IP_VS_ESTATS_ITEM("fullnat_conn_reused_lastack",
+			  FULLNAT_CONN_REUSED_LASTACK),
+	IP_VS_ESTATS_ITEM("fullnat_conn_reused_estab",
+			  FULLNAT_CONN_REUSED_ESTAB),
+	IP_VS_ESTATS_ITEM("synproxy_rs_error", SYNPROXY_RS_ERROR),
+	IP_VS_ESTATS_ITEM("synproxy_null_ack", SYNPROXY_NULL_ACK),
+	IP_VS_ESTATS_ITEM("synproxy_bad_ack", SYNPROXY_BAD_ACK),
+	IP_VS_ESTATS_ITEM("synproxy_ok_ack", SYNPROXY_OK_ACK),
+	IP_VS_ESTATS_ITEM("synproxy_syn_cnt", SYNPROXY_SYN_CNT),
+	IP_VS_ESTATS_ITEM("synproxy_ackstorm", SYNPROXY_ACK_STORM),
+	IP_VS_ESTATS_ITEM("synproxy_synsend_qlen", SYNPROXY_SYNSEND_QLEN),
+	IP_VS_ESTATS_ITEM("synproxy_conn_reused", SYNPROXY_CONN_REUSED),
+	IP_VS_ESTATS_ITEM("synproxy_conn_reused_close",
+			  SYNPROXY_CONN_REUSED_CLOSE),
+	IP_VS_ESTATS_ITEM("synproxy_conn_reused_timewait",
+			  SYNPROXY_CONN_REUSED_TIMEWAIT),
+	IP_VS_ESTATS_ITEM("synproxy_conn_reused_finwait",
+			  SYNPROXY_CONN_REUSED_FINWAIT),
+	IP_VS_ESTATS_ITEM("synproxy_conn_reused_closewait",
+			  SYNPROXY_CONN_REUSED_CLOSEWAIT),
+	IP_VS_ESTATS_ITEM("synproxy_conn_reused_lastack",
+			  SYNPROXY_CONN_REUSED_LASTACK),
+	IP_VS_ESTATS_ITEM("defence_ip_frag_drop", DEFENCE_IP_FRAG_DROP),
+	IP_VS_ESTATS_ITEM("defence_tcp_drop", DEFENCE_TCP_DROP),
+	IP_VS_ESTATS_ITEM("defence_udp_drop", DEFENCE_UDP_DROP),
+	IP_VS_ESTATS_LAST
+};
+
+static int ip_vs_estats_show(struct seq_file *seq, void *v)
+{
+	int i, j;
+
+	/* print CPU first */
+	seq_printf(seq, "                                  ");
+	for (i = 0; i < NR_CPUS; i++)
+		if (cpu_online(i))
+			seq_printf(seq, "CPU%d       ", i);
+	seq_putc(seq, '\n');
+
+	i = 0;
+	while (NULL != ext_stats[i].name) {
+		seq_printf(seq, "%-25s:", ext_stats[i].name);
+		for (j = 0; j < NR_CPUS; j++) {
+			if (cpu_online(j)) {
+				seq_printf(seq, "%10lu ",
+					   *(((unsigned long *)
+					      per_cpu_ptr(ip_vs_esmib,
+							  j)) +
+					     ext_stats[i].entry));
+			}
+		}
+		seq_putc(seq, '\n');
+		i++;
+	}
+	return 0;
+}
+
+static int ip_vs_estats_seq_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ip_vs_estats_show, NULL);
+}
+
+static const struct file_operations ip_vs_estats_fops = {
+	.owner = THIS_MODULE,
+	.open = ip_vs_estats_seq_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+#endif
+
 
 /*
  *	Set timeout values for tcp tcpfin udp in the timeout_table.
@@ -2128,6 +2739,8 @@ static int ip_vs_set_timeout(struct ip_vs_timeout_user *u)
 #define SERVICE_ARG_LEN		(sizeof(struct ip_vs_service_user))
 #define SVCDEST_ARG_LEN		(sizeof(struct ip_vs_service_user) +	\
 				 sizeof(struct ip_vs_dest_user))
+#define SVCLADDR_ARG_LEN	(sizeof(struct ip_vs_service_user) +	\
+				 sizeof(struct ip_vs_laddr_user))
 #define TIMEOUT_ARG_LEN		(sizeof(struct ip_vs_timeout_user))
 #define DAEMON_ARG_LEN		(sizeof(struct ip_vs_daemon_user))
 #define MAX_ARG_LEN		SVCDEST_ARG_LEN
@@ -2144,6 +2757,8 @@ static const unsigned char set_arglen[SET_CMDID(IP_VS_SO_SET_MAX)+1] = {
 	[SET_CMDID(IP_VS_SO_SET_STARTDAEMON)]	= DAEMON_ARG_LEN,
 	[SET_CMDID(IP_VS_SO_SET_STOPDAEMON)]	= DAEMON_ARG_LEN,
 	[SET_CMDID(IP_VS_SO_SET_ZERO)]		= SERVICE_ARG_LEN,
+    [SET_CMDID(IP_VS_SO_SET_ADDLADDR)]  = SVCLADDR_ARG_LEN,
+    [SET_CMDID(IP_VS_SO_SET_DELLADDR)]  = SVCLADDR_ARG_LEN,	
 };
 
 static void ip_vs_copy_usvc_compat(struct ip_vs_service_user_kern *usvc,
@@ -2178,6 +2793,12 @@ static void ip_vs_copy_udest_compat(struct ip_vs_dest_user_kern *udest,
 	udest->l_threshold	= udest_compat->l_threshold;
 }
 
+static void ip_vs_copy_uladdr_compat(struct ip_vs_laddr_user_kern *uladdr,
+				   struct ip_vs_laddr_user *uladdr_compat)
+{
+	uladdr->addr.ip = uladdr_compat->addr;
+}
+
 static int
 do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 {
@@ -2188,6 +2809,8 @@ do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 	struct ip_vs_service *svc;
 	struct ip_vs_dest_user *udest_compat;
 	struct ip_vs_dest_user_kern udest;
+	struct ip_vs_laddr_user *uladdr_compat;
+	struct ip_vs_laddr_user_kern uladdr;
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
@@ -2229,11 +2852,12 @@ do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 
 	usvc_compat = (struct ip_vs_service_user *)arg;
 	udest_compat = (struct ip_vs_dest_user *)(usvc_compat + 1);
+	uladdr_compat = (struct ip_vs_laddr_user *)(usvc_compat + 1);
 
 	/* We only use the new structs internally, so copy userspace compat
 	 * structs to extended internal versions */
 	ip_vs_copy_usvc_compat(&usvc, usvc_compat);
-	ip_vs_copy_udest_compat(&udest, udest_compat);
+	// ip_vs_copy_udest_compat(&udest, udest_compat);
 
 	if (cmd == IP_VS_SO_SET_ZERO) {
 		/* if no service address is set, zero counters in all */
@@ -2285,13 +2909,24 @@ do_ip_vs_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 		ret = ip_vs_zero_service(svc);
 		break;
 	case IP_VS_SO_SET_ADDDEST:
+	    ip_vs_copy_udest_compat(&udest, udest_compat);
 		ret = ip_vs_add_dest(svc, &udest);
 		break;
 	case IP_VS_SO_SET_EDITDEST:
+		ip_vs_copy_udest_compat(&udest, udest_compat);
 		ret = ip_vs_edit_dest(svc, &udest);
 		break;
 	case IP_VS_SO_SET_DELDEST:
+		ip_vs_copy_udest_compat(&udest, udest_compat);
 		ret = ip_vs_del_dest(svc, &udest);
+		break;
+	case IP_VS_SO_SET_ADDLADDR:
+		ip_vs_copy_uladdr_compat(&uladdr, uladdr_compat);
+		ret = ip_vs_add_laddr(svc, &uladdr);
+		break;
+	case IP_VS_SO_SET_DELLADDR:
+		ip_vs_copy_uladdr_compat(&uladdr, uladdr_compat);
+		ret = ip_vs_del_laddr(svc, &uladdr);
 		break;
 	default:
 		ret = -EINVAL;
@@ -2330,6 +2965,7 @@ ip_vs_copy_service(struct ip_vs_service_entry *dst, struct ip_vs_service *src)
 	dst->timeout = src->timeout / HZ;
 	dst->netmask = src->netmask;
 	dst->num_dests = src->num_dests;
+	dst->num_laddrs = src->num_laddrs;
 	ip_vs_copy_stats(&dst->stats, &src->stats);
 }
 
@@ -2429,6 +3065,47 @@ __ip_vs_get_dest_entries(const struct ip_vs_get_dests *get,
 	return ret;
 }
 
+static inline int
+__ip_vs_get_laddr_entries(const struct ip_vs_get_laddrs *get,
+			  struct ip_vs_get_laddrs __user * uptr)
+{
+	struct ip_vs_service *svc;
+	union nf_inet_addr addr = {.ip = get->addr };
+	int ret = 0;
+
+	if (get->fwmark)
+		svc = __ip_vs_svc_fwm_get(AF_INET, get->fwmark);
+	else
+		svc = __ip_vs_service_get(AF_INET, get->protocol, &addr,
+					  get->port);
+
+	if (svc) {
+		int count = 0;
+		struct ip_vs_laddr *laddr;
+		struct ip_vs_laddr_entry entry;
+
+		list_for_each_entry(laddr, &svc->laddr_list, n_list) {
+			if (count >= get->num_laddrs)
+				break;
+
+			entry.addr = laddr->addr.ip;
+			entry.port_conflict =
+			    atomic64_read(&laddr->port_conflict);
+			entry.conn_counts = atomic_read(&laddr->conn_counts);
+			if (copy_to_user(&uptr->entrytable[count],
+					 &entry, sizeof(entry))) {
+				ret = -EFAULT;
+				break;
+			}
+			count++;
+		}
+		ip_vs_service_put(svc);
+	} else
+		ret = -ESRCH;
+	return ret;
+}
+
+
 static inline void
 __ip_vs_get_timeouts(struct ip_vs_timeout_user *u)
 {
@@ -2450,6 +3127,7 @@ __ip_vs_get_timeouts(struct ip_vs_timeout_user *u)
 #define GET_SERVICES_ARG_LEN	(sizeof(struct ip_vs_get_services))
 #define GET_SERVICE_ARG_LEN	(sizeof(struct ip_vs_service_entry))
 #define GET_DESTS_ARG_LEN	(sizeof(struct ip_vs_get_dests))
+#define GET_LADDRS_ARG_LEN	(sizeof(struct ip_vs_get_laddrs))
 #define GET_TIMEOUT_ARG_LEN	(sizeof(struct ip_vs_timeout_user))
 #define GET_DAEMON_ARG_LEN	(sizeof(struct ip_vs_daemon_user) * 2)
 
@@ -2459,6 +3137,7 @@ static const unsigned char get_arglen[GET_CMDID(IP_VS_SO_GET_MAX)+1] = {
 	[GET_CMDID(IP_VS_SO_GET_SERVICES)]	= GET_SERVICES_ARG_LEN,
 	[GET_CMDID(IP_VS_SO_GET_SERVICE)]	= GET_SERVICE_ARG_LEN,
 	[GET_CMDID(IP_VS_SO_GET_DESTS)]		= GET_DESTS_ARG_LEN,
+	[GET_CMDID(IP_VS_SO_GET_LADDRS)] = GET_LADDRS_ARG_LEN,
 	[GET_CMDID(IP_VS_SO_GET_TIMEOUT)]	= GET_TIMEOUT_ARG_LEN,
 	[GET_CMDID(IP_VS_SO_GET_DAEMON)]	= GET_DAEMON_ARG_LEN,
 };
@@ -2567,6 +3246,23 @@ do_ip_vs_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 	}
 	break;
 
+	case IP_VS_SO_GET_LADDRS:
+		{
+			struct ip_vs_get_laddrs *get;
+			int size;
+
+			get = (struct ip_vs_get_laddrs *)arg;
+			size = sizeof(*get) +
+			    sizeof(struct ip_vs_laddr_entry) * get->num_laddrs;
+			if (*len != size) {
+				pr_err("length: %u != %u\n", *len, size);
+				ret = -EINVAL;
+				goto out;
+			}
+			ret = __ip_vs_get_laddr_entries(get, user);
+		}
+	break;
+
 	case IP_VS_SO_GET_TIMEOUT:
 	{
 		struct ip_vs_timeout_user t;
@@ -2639,6 +3335,7 @@ static const struct nla_policy ip_vs_cmd_policy[IPVS_CMD_ATTR_MAX + 1] = {
 	[IPVS_CMD_ATTR_TIMEOUT_TCP]	= { .type = NLA_U32 },
 	[IPVS_CMD_ATTR_TIMEOUT_TCP_FIN]	= { .type = NLA_U32 },
 	[IPVS_CMD_ATTR_TIMEOUT_UDP]	= { .type = NLA_U32 },
+	[IPVS_CMD_ATTR_LADDR] = {.type = NLA_NESTED},
 };
 
 /* Policy used for attributes in nested attribute IPVS_CMD_ATTR_DAEMON */
@@ -2683,6 +3380,14 @@ static const struct nla_policy ip_vs_dest_policy[IPVS_DEST_ATTR_MAX + 1] = {
 	[IPVS_DEST_ATTR_STATS]		= { .type = NLA_NESTED },
 };
 
+static const struct nla_policy ip_vs_laddr_policy[IPVS_LADDR_ATTR_MAX + 1] = {
+	[IPVS_LADDR_ATTR_ADDR] = {.type = NLA_BINARY,
+				  .len = sizeof(union nf_inet_addr)},
+	[IPVS_LADDR_ATTR_PORT_CONFLICT] = {.type = NLA_U64},
+	[IPVS_LADDR_ATTR_CONN_COUNTS] = {.type = NLA_U32},
+};
+
+
 static int ip_vs_genl_fill_stats(struct sk_buff *skb, int container_type,
 				 struct ip_vs_stats *stats)
 {
@@ -2692,9 +3397,9 @@ static int ip_vs_genl_fill_stats(struct sk_buff *skb, int container_type,
 
 	spin_lock_bh(&stats->lock);
 
-	NLA_PUT_U32(skb, IPVS_STATS_ATTR_CONNS, stats->ustats.conns);
-	NLA_PUT_U32(skb, IPVS_STATS_ATTR_INPKTS, stats->ustats.inpkts);
-	NLA_PUT_U32(skb, IPVS_STATS_ATTR_OUTPKTS, stats->ustats.outpkts);
+	NLA_PUT_U64(skb, IPVS_STATS_ATTR_CONNS, stats->ustats.conns);
+	NLA_PUT_U64(skb, IPVS_STATS_ATTR_INPKTS, stats->ustats.inpkts);
+	NLA_PUT_U64(skb, IPVS_STATS_ATTR_OUTPKTS, stats->ustats.outpkts);
 	NLA_PUT_U64(skb, IPVS_STATS_ATTR_INBYTES, stats->ustats.inbytes);
 	NLA_PUT_U64(skb, IPVS_STATS_ATTR_OUTBYTES, stats->ustats.outbytes);
 	NLA_PUT_U32(skb, IPVS_STATS_ATTR_CPS, stats->ustats.cps);
@@ -3008,6 +3713,116 @@ out_err:
 	return skb->len;
 }
 
+
+static int ip_vs_genl_fill_laddr(struct sk_buff *skb, struct ip_vs_laddr *laddr)
+{
+	struct nlattr *nl_laddr;
+
+	nl_laddr = nla_nest_start(skb, IPVS_CMD_ATTR_LADDR);
+	if (!nl_laddr)
+		return -EMSGSIZE;
+
+	NLA_PUT(skb, IPVS_LADDR_ATTR_ADDR, sizeof(laddr->addr), &laddr->addr);
+	NLA_PUT_U64(skb, IPVS_LADDR_ATTR_PORT_CONFLICT,
+		    atomic64_read(&laddr->port_conflict));
+	NLA_PUT_U32(skb, IPVS_LADDR_ATTR_CONN_COUNTS,
+		    atomic_read(&laddr->conn_counts));
+
+	nla_nest_end(skb, nl_laddr);
+
+	return 0;
+
+      nla_put_failure:
+	nla_nest_cancel(skb, nl_laddr);
+	return -EMSGSIZE;
+}
+
+static int ip_vs_genl_dump_laddr(struct sk_buff *skb, struct ip_vs_laddr *laddr,
+				 struct netlink_callback *cb)
+{
+	void *hdr;
+
+	hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).pid, cb->nlh->nlmsg_seq,
+			  &ip_vs_genl_family, NLM_F_MULTI, IPVS_CMD_NEW_LADDR);
+	if (!hdr)
+		return -EMSGSIZE;
+
+	if (ip_vs_genl_fill_laddr(skb, laddr) < 0)
+		goto nla_put_failure;
+
+	return genlmsg_end(skb, hdr);
+
+      nla_put_failure:
+	genlmsg_cancel(skb, hdr);
+	return -EMSGSIZE;
+}
+
+static int ip_vs_genl_dump_laddrs(struct sk_buff *skb,
+				  struct netlink_callback *cb)
+{
+	int idx = 0;
+	int start = cb->args[0];
+	struct ip_vs_service *svc;
+	struct ip_vs_laddr *laddr;
+	struct nlattr *attrs[IPVS_CMD_ATTR_MAX + 1];
+
+	mutex_lock(&__ip_vs_mutex);
+
+	/* Try to find the service for which to dump destinations */
+	if (nlmsg_parse(cb->nlh, GENL_HDRLEN, attrs,
+			IPVS_CMD_ATTR_MAX, ip_vs_cmd_policy))
+		goto out_err;
+
+	svc = ip_vs_genl_find_service(attrs[IPVS_CMD_ATTR_SERVICE]);
+	if (IS_ERR(svc) || svc == NULL)
+		goto out_err;
+
+	IP_VS_DBG_BUF(0, "vip %s:%d get local address \n",
+		      IP_VS_DBG_ADDR(svc->af, &svc->addr), ntohs(svc->port));
+
+	/* Dump the destinations */
+	list_for_each_entry(laddr, &svc->laddr_list, n_list) {
+		if (++idx <= start)
+			continue;
+
+		if (ip_vs_genl_dump_laddr(skb, laddr, cb) < 0) {
+			idx--;
+			goto nla_put_failure;
+		}
+	}
+
+      nla_put_failure:
+	cb->args[0] = idx;
+	ip_vs_service_put(svc);
+
+      out_err:
+	mutex_unlock(&__ip_vs_mutex);
+	return skb->len;
+}
+
+static int ip_vs_genl_parse_laddr(struct ip_vs_laddr_user_kern *uladdr,
+				  struct nlattr *nla, int full_entry)
+{
+	struct nlattr *attrs[IPVS_LADDR_ATTR_MAX + 1];
+	struct nlattr *nla_addr;
+
+	/* Parse mandatory identifying destination fields first */
+	if (nla == NULL ||
+	    nla_parse_nested(attrs, IPVS_LADDR_ATTR_MAX, nla,
+			     ip_vs_laddr_policy))
+		return -EINVAL;
+
+	nla_addr = attrs[IPVS_LADDR_ATTR_ADDR];
+	if (!nla_addr)
+		return -EINVAL;
+
+	memset(uladdr, 0, sizeof(*uladdr));
+	nla_memcpy(&uladdr->addr, nla_addr, sizeof(uladdr->addr));
+
+	return 0;
+}
+
+
 static int ip_vs_genl_parse_dest(struct ip_vs_dest_user_kern *udest,
 				 struct nlattr *nla, int full_entry)
 {
@@ -3168,6 +3983,8 @@ static int ip_vs_genl_set_cmd(struct sk_buff *skb, struct genl_info *info)
 	struct ip_vs_service *svc = NULL;
 	struct ip_vs_service_user_kern usvc;
 	struct ip_vs_dest_user_kern udest;
+	struct ip_vs_laddr_user_kern uladdr;
+
 	int ret = 0, cmd;
 	int need_full_svc = 0, need_full_dest = 0;
 
@@ -3245,6 +4062,15 @@ static int ip_vs_genl_set_cmd(struct sk_buff *skb, struct genl_info *info)
 			goto out;
 	}
 
+
+	if (cmd == IPVS_CMD_NEW_LADDR || cmd == IPVS_CMD_DEL_LADDR) {
+		ret = ip_vs_genl_parse_laddr(&uladdr,
+					     info->attrs[IPVS_CMD_ATTR_LADDR],
+					     1);
+		if (ret)
+			goto out;
+	}
+
 	switch (cmd) {
 	case IPVS_CMD_NEW_SERVICE:
 		if (svc == NULL)
@@ -3269,6 +4095,12 @@ static int ip_vs_genl_set_cmd(struct sk_buff *skb, struct genl_info *info)
 		break;
 	case IPVS_CMD_ZERO:
 		ret = ip_vs_zero_service(svc);
+		break;
+	case IPVS_CMD_NEW_LADDR:
+		ret = ip_vs_add_laddr(svc, &uladdr);
+		break;
+	case IPVS_CMD_DEL_LADDR:
+		ret = ip_vs_del_laddr(svc, &uladdr);
 		break;
 	default:
 		ret = -EINVAL;
@@ -3468,6 +4300,24 @@ static struct genl_ops ip_vs_genl_ops[] __read_mostly = {
 		.flags	= GENL_ADMIN_PERM,
 		.doit	= ip_vs_genl_set_cmd,
 	},
+   {
+    .cmd = IPVS_CMD_NEW_LADDR,
+    .flags = GENL_ADMIN_PERM,
+    .policy = ip_vs_cmd_policy,
+    .doit = ip_vs_genl_set_cmd,
+    },
+   {
+    .cmd = IPVS_CMD_DEL_LADDR,
+    .flags = GENL_ADMIN_PERM,
+    .policy = ip_vs_cmd_policy,
+    .doit = ip_vs_genl_set_cmd,
+    },
+   {
+    .cmd = IPVS_CMD_GET_LADDR,
+    .flags = GENL_ADMIN_PERM,
+    .policy = ip_vs_cmd_policy,
+    .dumpit = ip_vs_genl_dump_laddrs,
+    },
 };
 
 static int __init ip_vs_genl_register(void)
@@ -3504,8 +4354,18 @@ int __init ip_vs_control_init(void)
 		return ret;
 	}
 
+	if ((ip_vs_esmib = alloc_percpu(struct ip_vs_estats_mib)) == NULL) {
+		pr_err("cannot allocate percpu struct ip_vs_estats_mib.\n");
+		ip_vs_genl_unregister();
+		nf_unregister_sockopt(&ip_vs_sockopts);
+		return 1;
+	}
+
+
 	sysctl_ip_vs_sync_qlen_max = nr_free_buffer_pages() / 32;
 	sysctl_ip_vs_sync_retries  = clamp_t(int, DEFAULT_SYNC_RETRIES, 0, 3);
+
+	proc_net_fops_create(&init_net, "ip_vs_ext_stats", 0, &ip_vs_estats_fops);
 
 	proc_net_fops_create(&init_net, "ip_vs", 0, &ip_vs_info_fops);
 	proc_net_fops_create(&init_net, "ip_vs_stats",0, &ip_vs_stats_fops);
@@ -3541,6 +4401,8 @@ void ip_vs_control_cleanup(void)
 	unregister_sysctl_table(sysctl_header);
 	proc_net_remove(&init_net, "ip_vs_stats");
 	proc_net_remove(&init_net, "ip_vs");
+	proc_net_remove(&init_net, "ip_vs_ext_stats");
+	free_percpu(ip_vs_esmib);
 	ip_vs_genl_unregister();
 	nf_unregister_sockopt(&ip_vs_sockopts);
 	LeaveFunction(2);

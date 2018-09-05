@@ -49,6 +49,7 @@
 #endif
 
 #include <net/ip_vs.h>
+#include <net/ip_vs_synproxy.h>
 
 
 EXPORT_SYMBOL(register_ip_vs_scheduler);
@@ -56,8 +57,7 @@ EXPORT_SYMBOL(unregister_ip_vs_scheduler);
 EXPORT_SYMBOL(ip_vs_skb_replace);
 EXPORT_SYMBOL(ip_vs_proto_name);
 EXPORT_SYMBOL(ip_vs_conn_new);
-EXPORT_SYMBOL(ip_vs_conn_in_get);
-EXPORT_SYMBOL(ip_vs_conn_out_get);
+EXPORT_SYMBOL(ip_vs_conn_get);
 #ifdef CONFIG_IP_VS_PROTO_TCP
 EXPORT_SYMBOL(ip_vs_tcp_conn_listen);
 #endif
@@ -198,7 +198,7 @@ ip_vs_conn_fill_param_persist(const struct ip_vs_service *svc,
 static struct ip_vs_conn *
 ip_vs_sched_persist(struct ip_vs_service *svc,
 		    struct sk_buff *skb,
-		    __be16 src_port, __be16 dst_port)
+		    __be16 src_port, __be16 dst_port, int is_synproxy_on)
 {
 	struct ip_vs_conn *cp = NULL;
 	struct ip_vs_iphdr iph;
@@ -291,7 +291,7 @@ ip_vs_sched_persist(struct ip_vs_service *svc,
 		 * and thus param.pe_data will be destroyed
 		 * when the template expires */
 		ct = ip_vs_conn_new(&param, &dest->addr, dport,
-				    IP_VS_CONN_F_TEMPLATE, dest, skb->mark);
+				    IP_VS_CONN_F_TEMPLATE, dest, skb->mark, NULL, 0);
 		if (ct == NULL) {
 			kfree(param.pe_data);
 			return NULL;
@@ -318,7 +318,7 @@ ip_vs_sched_persist(struct ip_vs_service *svc,
 	ip_vs_conn_fill_param(svc->af, iph.protocol, &iph.saddr, src_port,
 			      &iph.daddr, dst_port, &param);
 
-	cp = ip_vs_conn_new(&param, &dest->addr, dport, flags, dest, skb->mark);
+	cp = ip_vs_conn_new(&param, &dest->addr, dport, flags, dest, skb->mark, skb, is_synproxy_on);
 	if (cp == NULL) {
 		ip_vs_conn_put(ct);
 		return NULL;
@@ -342,7 +342,7 @@ ip_vs_sched_persist(struct ip_vs_service *svc,
  *  Protocols supported: TCP, UDP
  */
 struct ip_vs_conn *
-ip_vs_schedule(struct ip_vs_service *svc, struct sk_buff *skb)
+ip_vs_schedule(struct ip_vs_service *svc, struct sk_buff *skb, int is_synproxy_on)
 {
 	struct ip_vs_conn *cp = NULL;
 	struct ip_vs_iphdr iph;
@@ -359,7 +359,7 @@ ip_vs_schedule(struct ip_vs_service *svc, struct sk_buff *skb)
 	 *    Persistent service
 	 */
 	if (svc->flags & IP_VS_SVC_F_PERSISTENT) {
-		return ip_vs_sched_persist(svc, skb, pptr[0], pptr[1]);
+		return ip_vs_sched_persist(svc, skb, pptr[0], pptr[1], is_synproxy_on);
 	}
 
 	/*
@@ -392,7 +392,7 @@ ip_vs_schedule(struct ip_vs_service *svc, struct sk_buff *skb)
 				      pptr[0], &iph.daddr, pptr[1], &p);
 		cp = ip_vs_conn_new(&p, &dest->addr,
 				    dest->port ? dest->port : pptr[1],
-				    flags, dest, skb->mark);
+				    flags, dest, skb->mark, skb, is_synproxy_on);
 		if (!cp)
 			return NULL;
 	}
@@ -458,7 +458,7 @@ int ip_vs_leave(struct ip_vs_service *svc, struct sk_buff *skb,
 					      &iph.daddr, pptr[1], &p);
 			cp = ip_vs_conn_new(&p, &daddr, 0,
 					    IP_VS_CONN_F_BYPASS | flags,
-					    NULL, skb->mark);
+					    NULL, skb->mark, NULL, 0);
 			if (!cp)
 				return NF_DROP;
 		}
@@ -552,101 +552,10 @@ static inline int ip_vs_gather_frags_v6(struct sk_buff *skb, u_int32_t user)
 }
 #endif
 
-/*
- * Packet has been made sufficiently writable in caller
- * - inout: 1=in->out, 0=out->in
- */
-void ip_vs_nat_icmp(struct sk_buff *skb, struct ip_vs_protocol *pp,
-		    struct ip_vs_conn *cp, int inout)
-{
-	struct iphdr *iph	 = ip_hdr(skb);
-	unsigned int icmp_offset = iph->ihl*4;
-	struct icmphdr *icmph	 = (struct icmphdr *)(skb_network_header(skb) +
-						      icmp_offset);
-	struct iphdr *ciph	 = (struct iphdr *)(icmph + 1);
 
-	if (inout) {
-		iph->saddr = cp->vaddr.ip;
-		ip_send_check(iph);
-		ciph->daddr = cp->vaddr.ip;
-		ip_send_check(ciph);
-	} else {
-		iph->daddr = cp->daddr.ip;
-		ip_send_check(iph);
-		ciph->saddr = cp->daddr.ip;
-		ip_send_check(ciph);
-	}
-
-	/* the TCP/UDP/SCTP port */
-	if (IPPROTO_TCP == ciph->protocol || IPPROTO_UDP == ciph->protocol ||
-	    IPPROTO_SCTP == ciph->protocol) {
-		__be16 *ports = (void *)ciph + ciph->ihl*4;
-
-		if (inout)
-			ports[1] = cp->vport;
-		else
-			ports[0] = cp->dport;
-	}
-
-	/* And finally the ICMP checksum */
-	icmph->checksum = 0;
-	icmph->checksum = ip_vs_checksum_complete(skb, icmp_offset);
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-
-	if (inout)
-		IP_VS_DBG_PKT(11, pp, skb, (void *)ciph - (void *)iph,
-			"Forwarding altered outgoing ICMP");
-	else
-		IP_VS_DBG_PKT(11, pp, skb, (void *)ciph - (void *)iph,
-			"Forwarding altered incoming ICMP");
-}
-
-#ifdef CONFIG_IP_VS_IPV6
-void ip_vs_nat_icmp_v6(struct sk_buff *skb, struct ip_vs_protocol *pp,
-		    struct ip_vs_conn *cp, int inout)
-{
-	struct ipv6hdr *iph	 = ipv6_hdr(skb);
-	unsigned int icmp_offset = sizeof(struct ipv6hdr);
-	struct icmp6hdr *icmph	 = (struct icmp6hdr *)(skb_network_header(skb) +
-						      icmp_offset);
-	struct ipv6hdr *ciph	 = (struct ipv6hdr *)(icmph + 1);
-
-	if (inout) {
-		iph->saddr = cp->vaddr.in6;
-		ciph->daddr = cp->vaddr.in6;
-	} else {
-		iph->daddr = cp->daddr.in6;
-		ciph->saddr = cp->daddr.in6;
-	}
-
-	/* the TCP/UDP/SCTP port */
-	if (IPPROTO_TCP == ciph->nexthdr || IPPROTO_UDP == ciph->nexthdr ||
-	    IPPROTO_SCTP == ciph->nexthdr) {
-		__be16 *ports = (void *)ciph + sizeof(struct ipv6hdr);
-
-		if (inout)
-			ports[1] = cp->vport;
-		else
-			ports[0] = cp->dport;
-	}
-
-	/* And finally the ICMP checksum */
-	icmph->icmp6_cksum = 0;
-	/* TODO IPv6: is this correct for ICMPv6? */
-	ip_vs_checksum_complete(skb, icmp_offset);
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-
-	if (inout)
-		IP_VS_DBG_PKT(11, pp, skb, (void *)ciph - (void *)iph,
-			"Forwarding altered outgoing ICMPv6");
-	else
-		IP_VS_DBG_PKT(11, pp, skb, (void *)ciph - (void *)iph,
-			"Forwarding altered incoming ICMPv6");
-}
-#endif
 
 /* Handle relevant response ICMP messages - forward to the right
- * destination host. Used for NAT and local client.
+ * destination host. Used for NAT / local client / FULLNAT.
  */
 static int handle_response_icmp(int af, struct sk_buff *skb,
 				union nf_inet_addr *snet,
@@ -656,7 +565,8 @@ static int handle_response_icmp(int af, struct sk_buff *skb,
 {
 	unsigned int verdict = NF_DROP;
 
-	if (IP_VS_FWD_METHOD(cp) != 0) {
+	if ((IP_VS_FWD_METHOD(cp) != IP_VS_CONN_F_MASQ)
+	    && (IP_VS_FWD_METHOD(cp) != IP_VS_CONN_F_FULLNAT)) {
 		pr_err("shouldn't reach here, because the box is on the "
 		       "half connection in the tun/dr module.\n");
 	}
@@ -672,21 +582,30 @@ static int handle_response_icmp(int af, struct sk_buff *skb,
 	if (IPPROTO_TCP == protocol || IPPROTO_UDP == protocol ||
 	    IPPROTO_SCTP == protocol)
 		offset += 2 * sizeof(__u16);
-	if (!skb_make_writable(skb, offset))
-		goto out;
 
-#ifdef CONFIG_IP_VS_IPV6
-	if (af == AF_INET6)
-		ip_vs_nat_icmp_v6(skb, pp, cp, 1);
-	else
-#endif
-		ip_vs_nat_icmp(skb, pp, cp, 1);
 
 	/* do the statistics and put it back */
 	ip_vs_out_stats(cp, skb);
 
-	skb->ipvs_property = 1;
-	verdict = NF_ACCEPT;
+	if (IP_VS_FWD_METHOD(cp) == IP_VS_CONN_F_FULLNAT) {
+#ifdef CONFIG_IP_VS_IPV6
+		if (af == AF_INET6)
+			verdict = ip_vs_fnat_response_icmp_xmit_v6(skb, pp, cp,
+							     offset);
+		else
+#endif
+			verdict = ip_vs_fnat_response_icmp_xmit(skb, pp, cp, offset);
+
+	} else {
+#ifdef CONFIG_IP_VS_IPV6
+		if (af == AF_INET6)
+			verdict = ip_vs_normal_response_icmp_xmit_v6(skb, pp, cp,
+							       offset);
+		else
+#endif
+			verdict = ip_vs_normal_response_icmp_xmit(skb, pp, cp,
+							    offset);
+	}
 
 out:
 	__ip_vs_conn_put(cp);
@@ -709,6 +628,7 @@ static int ip_vs_out_icmp(struct sk_buff *skb, int *related)
 	struct ip_vs_protocol *pp;
 	unsigned int offset, ihl;
 	union nf_inet_addr snet;
+	int res_dir;
 
 	*related = 1;
 
@@ -763,7 +683,7 @@ static int ip_vs_out_icmp(struct sk_buff *skb, int *related)
 
 	ip_vs_fill_iphdr(AF_INET, cih, &ciph);
 	/* The embedded headers contain source and dest in reverse order */
-	cp = pp->conn_out_get(AF_INET, skb, pp, &ciph, offset, 1);
+	cp = pp->conn_out_get(AF_INET, skb, pp, &ciph, offset, 1, &res_dir);
 	if (!cp)
 		return NF_ACCEPT;
 
@@ -784,6 +704,7 @@ static int ip_vs_out_icmp_v6(struct sk_buff *skb, int *related)
 	struct ip_vs_protocol *pp;
 	unsigned int offset;
 	union nf_inet_addr snet;
+	int res_dir;
 
 	*related = 1;
 
@@ -838,7 +759,7 @@ static int ip_vs_out_icmp_v6(struct sk_buff *skb, int *related)
 
 	ip_vs_fill_iphdr(AF_INET6, cih, &ciph);
 	/* The embedded headers contain source and dest in reverse order */
-	cp = pp->conn_out_get(AF_INET6, skb, pp, &ciph, offset, 1);
+	cp = pp->conn_out_get(AF_INET6, skb, pp, &ciph, offset, 1, &res_dir);
 	if (!cp)
 		return NF_ACCEPT;
 
@@ -874,61 +795,53 @@ static inline int is_tcp_reset(const struct sk_buff *skb, int nh_len)
 }
 
 /* Handle response packets: rewrite addresses and send away...
- * Used for NAT and local client.
+ * Used for NAT / local client / FULLNAT.
  */
 static unsigned int
 handle_response(int af, struct sk_buff *skb, struct ip_vs_protocol *pp,
 		struct ip_vs_conn *cp, int ihl)
 {
-	IP_VS_DBG_PKT(11, pp, skb, 0, "Outgoing packet");
+	unsigned int ret = NF_DROP;
 
-	if (!skb_make_writable(skb, ihl))
-		goto drop;
+	/* statistics */
+	ip_vs_out_stats(cp, skb);
 
-	/* mangle the packet */
-	if (pp->snat_handler && !pp->snat_handler(skb, pp, cp))
-		goto drop;
-
-#ifdef CONFIG_IP_VS_IPV6
-	if (af == AF_INET6)
-		ipv6_hdr(skb)->saddr = cp->vaddr.in6;
-	else
-#endif
-	{
-		ip_hdr(skb)->saddr = cp->vaddr.ip;
-		ip_send_check(ip_hdr(skb));
+	/*
+	 * Syn-proxy step 3 logic: receive syn-ack from rs.
+	 */
+	if (ip_vs_synproxy_synack_rcv(skb, cp, pp, ihl, &ret) == 0) {
+		goto out;
 	}
 
-	/* For policy routing, packets originating from this
-	 * machine itself may be routed differently to packets
-	 * passing through.  We want this packet to be routed as
-	 * if it came from this machine itself.  So re-compute
-	 * the routing information.
-	 */
+	/* state transition */
+	ip_vs_set_state(cp, IP_VS_DIR_OUTPUT, skb, pp);
+
+
+	/* transmit */
+	if (cp->flags & IP_VS_CONN_F_FULLNAT) {
 #ifdef CONFIG_IP_VS_IPV6
 	if (af == AF_INET6) {
-		if (ip6_route_me_harder(skb) != 0)
-			goto drop;
+		ret = ip_vs_fnat_response_xmit_v6(skb, pp, cp, ihl);
 	} else
 #endif
-		if (ip_route_me_harder(skb, RTN_LOCAL) != 0)
-			goto drop;
+		{
+			ret = ip_vs_fnat_response_xmit(skb, pp, cp, ihl);
+		}
+	} else {
+#ifdef CONFIG_IP_VS_IPV6
+	if (af == AF_INET6) {
+		ret = ip_vs_normal_response_xmit_v6(skb, pp, cp, ihl);
+	} else
+#endif
+		{
+			ret = ip_vs_normal_response_xmit(skb, pp, cp, ihl);
+		}
+	}
 
-	IP_VS_DBG_PKT(10, pp, skb, 0, "After SNAT");
-
-	ip_vs_out_stats(cp, skb);
-	ip_vs_set_state(cp, IP_VS_DIR_OUTPUT, skb, pp);
+out:
 	ip_vs_conn_put(cp);
+	return ret;
 
-	skb->ipvs_property = 1;
-
-	LeaveFunction(11);
-	return NF_ACCEPT;
-
-drop:
-	ip_vs_conn_put(cp);
-	kfree_skb(skb);
-	return NF_STOLEN;
 }
 
 /*
@@ -944,6 +857,7 @@ ip_vs_out(unsigned int hooknum, struct sk_buff *skb,
 	struct ip_vs_protocol *pp;
 	struct ip_vs_conn *cp;
 	int af;
+	int res_dir;
 
 	EnterFunction(11);
 
@@ -1000,7 +914,7 @@ ip_vs_out(unsigned int hooknum, struct sk_buff *skb,
 	/*
 	 * Check if the packet belongs to an existing entry
 	 */
-	cp = pp->conn_out_get(af, skb, pp, &iph, iph.len, 0);
+	cp = pp->conn_out_get(af, skb, pp, &iph, iph.len, 0, &res_dir);
 
 	if (unlikely(!cp)) {
 		if (sysctl_ip_vs_nat_icmp_send &&
@@ -1069,6 +983,7 @@ ip_vs_in_icmp(struct sk_buff *skb, int *related, unsigned int hooknum)
 	struct ip_vs_protocol *pp;
 	unsigned int offset, ihl, verdict;
 	union nf_inet_addr snet;
+	int res_dir;
 
 	*related = 1;
 
@@ -1124,17 +1039,16 @@ ip_vs_in_icmp(struct sk_buff *skb, int *related, unsigned int hooknum)
 
 	ip_vs_fill_iphdr(AF_INET, cih, &ciph);
 	/* The embedded headers contain source and dest in reverse order */
-	cp = pp->conn_in_get(AF_INET, skb, pp, &ciph, offset, 1);
+	cp = pp->conn_in_get(AF_INET, skb, pp, &ciph, offset, 1, &res_dir);
 	if (!cp) {
-		/* The packet could also belong to a local client */
-		cp = pp->conn_out_get(AF_INET, skb, pp, &ciph, offset, 1);
-		if (cp) {
-			snet.ip = iph->saddr;
-			return handle_response_icmp(AF_INET, skb, &snet,
-						    cih->protocol, cp, pp,
-						    offset, ihl);
-		}
 		return NF_ACCEPT;
+	}
+
+	if (res_dir == IP_VS_CIDX_F_IN2OUT) {
+		/* The packet belong to a local client / fullnat */
+		snet.ip = iph->saddr;
+		return handle_response_icmp(AF_INET, skb, &snet,
+					    cih->protocol, cp, pp, offset, ihl);
 	}
 
 	verdict = NF_DROP;
@@ -1173,6 +1087,7 @@ ip_vs_in_icmp_v6(struct sk_buff *skb, int *related, unsigned int hooknum)
 	struct ip_vs_protocol *pp;
 	unsigned int offset, verdict;
 	union nf_inet_addr snet;
+	int res_dir;
 
 	*related = 1;
 
@@ -1229,18 +1144,18 @@ ip_vs_in_icmp_v6(struct sk_buff *skb, int *related, unsigned int hooknum)
 
 	ip_vs_fill_iphdr(AF_INET6, cih, &ciph);
 	/* The embedded headers contain source and dest in reverse order */
-	cp = pp->conn_in_get(AF_INET6, skb, pp, &ciph, offset, 1);
+	cp = pp->conn_in_get(AF_INET6, skb, pp, &ciph, offset, 1, &res_dir);
 	if (!cp) {
 		/* The packet could also belong to a local client */
-		cp = pp->conn_out_get(AF_INET6, skb, pp, &ciph, offset, 1);
-		if (cp) {
-			ipv6_addr_copy(&snet.in6, &iph->saddr);
-			return handle_response_icmp(AF_INET6, skb, &snet,
-						    cih->nexthdr,
-						    cp, pp, offset,
-						    sizeof(struct ipv6hdr));
-		}
 		return NF_ACCEPT;
+	}
+
+	if (res_dir == IP_VS_CIDX_F_IN2OUT) {
+		ipv6_addr_copy(&snet.in6, &iph->saddr);
+		return handle_response_icmp(AF_INET6, skb, &snet,
+					    cih->nexthdr,
+					    cp, pp, offset,
+					    sizeof(struct ipv6hdr));
 	}
 
 	verdict = NF_DROP;
@@ -1273,6 +1188,8 @@ ip_vs_in(unsigned int hooknum, struct sk_buff *skb,
 	struct ip_vs_protocol *pp;
 	struct ip_vs_conn *cp;
 	int ret, restart, af, pkts;
+	int v = NF_DROP;
+	int res_dir;
 
 	af = (skb->protocol == htons(ETH_P_IP)) ? AF_INET : AF_INET6;
 
@@ -1317,15 +1234,16 @@ ip_vs_in(unsigned int hooknum, struct sk_buff *skb,
 	/*
 	 * Check if the packet belongs to an existing connection entry
 	 */
-	cp = pp->conn_in_get(af, skb, pp, &iph, iph.len, 0);
+	cp = pp->conn_in_get(af, skb, pp, &iph, iph.len, 0, &res_dir);
 
-	if (unlikely(!cp)) {
-		int v;
-
-		/* For local client packets, it could be a response */
-		cp = pp->conn_out_get(af, skb, pp, &iph, iph.len, 0);
-		if (cp)
+	if (likely(cp)) {
+		/* For full-nat/local-client packets, it could be a response */
+		if (res_dir == IP_VS_CIDX_F_IN2OUT) {
 			return handle_response(af, skb, pp, cp, iph.len);
+		}
+	} else {
+		/* create a new connection */
+		int v;
 
 		if (!pp->conn_schedule(af, skb, pp, &v, &cp))
 			return v;
@@ -1355,6 +1273,32 @@ ip_vs_in(unsigned int hooknum, struct sk_buff *skb,
 	}
 
 	ip_vs_in_stats(cp, skb);
+
+	/*
+	 * Filter out-in ack packet when cp is at SYN_SENT state.
+	 * DROP it if not a valid packet, STORE it if we have 
+	 * space left. 
+	 */
+	if ((cp->flags & IP_VS_CONN_F_SYNPROXY) &&
+	    (0 == ip_vs_synproxy_filter_ack(skb, cp, pp, &iph, &v))) {
+		ip_vs_conn_put(cp);
+		return v;
+	}
+
+	/*
+	 * "Reuse" syn-proxy sessions.
+	 * "Reuse" means update syn_proxy_seq struct and clean ack_skb etc.
+	 */
+	if ((cp->flags & IP_VS_CONN_F_SYNPROXY) &&
+	    (0 != sysctl_ip_vs_synproxy_conn_reuse)) {
+		int v = NF_DROP;
+
+		if (0 == ip_vs_synproxy_reuse_conn(af, skb, cp, pp, &iph, &v)) {
+			ip_vs_conn_put(cp);
+			return v;
+		}
+	}
+
 	restart = ip_vs_set_state(cp, IP_VS_DIR_INPUT, skb, pp);
 	if (cp->packet_xmit)
 		ret = cp->packet_xmit(skb, cp, pp);
@@ -1423,6 +1367,51 @@ ip_vs_forward_icmp_v6(unsigned int hooknum, struct sk_buff *skb,
 #endif
 
 
+
+#define IPPROTO_OSPF 89
+static unsigned int
+ip_vs_pre_routing(unsigned int hooknum, struct sk_buff *skb,
+		  const struct net_device *in, const struct net_device *out,
+		  int (*okfn) (struct sk_buff *))
+{
+	struct ip_vs_iphdr iph;
+	int af;
+	struct ip_vs_service *svc;
+
+	af = (skb->protocol == htons(ETH_P_IP)) ? AF_INET : AF_INET6;
+
+	ip_vs_fill_iphdr(af, skb_network_header(skb), &iph);
+
+	/* drop all ip fragment except ospf */
+	if ((sysctl_ip_vs_frag_drop_entry == 1)
+	    && (ip_hdr(skb)->frag_off & htons(IP_MF | IP_OFFSET))
+	    && (iph.protocol != IPPROTO_OSPF)) {
+		IP_VS_INC_ESTATS(ip_vs_esmib, DEFENCE_IP_FRAG_DROP);
+		return NF_DROP;
+	}
+
+	/* drop udp packet which send to tcp-vip */
+	if ((sysctl_ip_vs_udp_drop_entry == 1) && (iph.protocol == IPPROTO_UDP)) {
+		if ((svc =
+		     ip_vs_lookup_vip(af, IPPROTO_TCP, &iph.daddr)) != NULL) {
+			IP_VS_INC_ESTATS(ip_vs_esmib, DEFENCE_UDP_DROP);
+			return NF_DROP;
+		}
+	}
+
+	/* synproxy: defence synflood */
+	if (iph.protocol == IPPROTO_TCP) {
+		int v = NF_ACCEPT;
+		if (0 == ip_vs_synproxy_syn_rcv(af, skb, &iph, &v)) {
+			return v;
+		}
+	}
+
+	return NF_ACCEPT;
+}
+
+
+
 static struct nf_hook_ops ip_vs_ops[] __read_mostly = {
 	/* After packet filtering, forward packet through VS/DR, VS/TUN,
 	 * or VS/NAT(change destination), so that filtering rules can be
@@ -1459,6 +1448,15 @@ static struct nf_hook_ops ip_vs_ops[] __read_mostly = {
 		.hooknum        = NF_INET_POST_ROUTING,
 		.priority       = NF_IP_PRI_NAT_SRC-1,
 	},
+	/* Before the netfilter connection tracking, only deal with FULLNAT/NAT-SynProxy */
+	{
+	 .hook		= ip_vs_pre_routing,
+	 .owner		= THIS_MODULE,
+	 .pf	= PF_INET,
+	 .hooknum        = NF_INET_PRE_ROUTING,
+	 .priority       = NF_IP_PRI_CONNTRACK-1,
+	 },
+
 #ifdef CONFIG_IP_VS_IPV6
 	/* After packet filtering, forward packet through VS/DR, VS/TUN,
 	 * or VS/NAT(change destination), so that filtering rules can be
@@ -1495,6 +1493,14 @@ static struct nf_hook_ops ip_vs_ops[] __read_mostly = {
 		.hooknum        = NF_INET_POST_ROUTING,
 		.priority       = NF_IP6_PRI_NAT_SRC-1,
 	},
+	/* Before the netfilter connection tracking, only deal with FULLNAT/NAT-SynProxy */
+	{
+	 .hook = ip_vs_pre_routing,
+	 .owner = THIS_MODULE,
+	 .pf = PF_INET6,
+	 .hooknum = NF_INET_PRE_ROUTING,
+	 .priority = NF_IP6_PRI_CONNTRACK-1,
+	 },
 #endif
 };
 

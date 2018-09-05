@@ -57,13 +57,13 @@ ah_esp_conn_fill_param_proto(int af, const struct ip_vs_iphdr *iph,
 static struct ip_vs_conn *
 ah_esp_conn_in_get(int af, const struct sk_buff *skb, struct ip_vs_protocol *pp,
 		   const struct ip_vs_iphdr *iph, unsigned int proto_off,
-		   int inverse)
+		   int inverse, int *res_dir)
 {
 	struct ip_vs_conn *cp;
 	struct ip_vs_conn_param p;
 
 	ah_esp_conn_fill_param_proto(af, iph, inverse, &p);
-	cp = ip_vs_conn_in_get(&p);
+	cp = ip_vs_conn_get(&p, res_dir);
 	if (!cp) {
 		/*
 		 * We are not sure if the packet is from our
@@ -86,13 +86,13 @@ ah_esp_conn_out_get(int af, const struct sk_buff *skb,
 		    struct ip_vs_protocol *pp,
 		    const struct ip_vs_iphdr *iph,
 		    unsigned int proto_off,
-		    int inverse)
+		    int inverse, int *res_dir)
 {
 	struct ip_vs_conn *cp;
 	struct ip_vs_conn_param p;
 
 	ah_esp_conn_fill_param_proto(af, iph, inverse, &p);
-	cp = ip_vs_conn_out_get(&p);
+	cp = ip_vs_conn_get(&p, res_dir);
 	if (!cp) {
 		IP_VS_DBG_BUF(12, "Unknown ISAKMP entry for inout packet "
 			      "%s%s %s->%s\n",

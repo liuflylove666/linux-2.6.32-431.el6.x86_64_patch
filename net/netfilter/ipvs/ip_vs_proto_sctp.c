@@ -44,7 +44,7 @@ sctp_conn_schedule(int af, struct sk_buff *skb, struct ip_vs_protocol *pp,
 		 * Let the virtual server select a real server for the
 		 * incoming connection, and create a connection entry.
 		 */
-		*cpp = ip_vs_schedule(svc, skb);
+		*cpp = ip_vs_schedule(svc, skb, 0);
 		if (!*cpp) {
 			*verdict = ip_vs_leave(svc, skb, pp);
 			return 0;

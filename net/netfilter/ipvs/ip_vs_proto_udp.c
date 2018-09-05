@@ -60,7 +60,7 @@ udp_conn_schedule(int af, struct sk_buff *skb, struct ip_vs_protocol *pp,
 		 * Let the virtual server select a real server for the
 		 * incoming connection, and create a connection entry.
 		 */
-		*cpp = ip_vs_schedule(svc, skb);
+		*cpp = ip_vs_schedule(svc, skb, 0);
 		if (!*cpp) {
 			*verdict = ip_vs_leave(svc, skb, pp);
 			return 0;
@@ -148,6 +148,7 @@ udp_snat_handler(struct sk_buff *skb,
 
 	udph = (void *)skb_network_header(skb) + udphoff;
 	udph->source = cp->vport;
+	udph->dest = cp->cport;
 
 	/*
 	 *	Adjust UDP checksums
@@ -156,10 +157,17 @@ udp_snat_handler(struct sk_buff *skb,
 		udp_partial_csum_update(cp->af, udph, &cp->daddr, &cp->vaddr,
 					htons(oldlen),
 					htons(skb->len - udphoff));
+		udp_partial_csum_update(cp->af, udph, &cp->laddr, &cp->caddr,
+					htons(oldlen),
+					htons(skb->len - udphoff));
+
 	} else if (!cp->app && (udph->check != 0)) {
 		/* Only port and addr are changed, do fast csum update */
 		udp_fast_csum_update(cp->af, udph, &cp->daddr, &cp->vaddr,
 				     cp->dport, cp->vport);
+		udp_fast_csum_update(cp->af, udph, &cp->laddr, &cp->caddr,
+				     cp->lport, cp->cport);
+
 		if (skb->ip_summed == CHECKSUM_COMPLETE)
 			skb->ip_summed = CHECKSUM_NONE;
 	} else {
@@ -223,6 +231,7 @@ udp_dnat_handler(struct sk_buff *skb,
 	}
 
 	udph = (void *)skb_network_header(skb) + udphoff;
+	udph->source = cp->lport;
 	udph->dest = cp->dport;
 
 	/*
@@ -232,10 +241,15 @@ udp_dnat_handler(struct sk_buff *skb,
 		udp_partial_csum_update(cp->af, udph, &cp->vaddr, &cp->daddr,
 					htons(oldlen),
 					htons(skb->len - udphoff));
+		udp_partial_csum_update(cp->af, udph, &cp->caddr, &cp->laddr,
+					htons(oldlen),
+					htons(skb->len - udphoff));
 	} else if (!cp->app && (udph->check != 0)) {
 		/* Only port and addr are changed, do fast csum update */
 		udp_fast_csum_update(cp->af, udph, &cp->vaddr, &cp->daddr,
 				     cp->vport, cp->dport);
+		udp_fast_csum_update(cp->af, udph, &cp->caddr, &cp->laddr,
+				     cp->cport, cp->lport);
 		if (skb->ip_summed == CHECKSUM_COMPLETE)
 			skb->ip_summed = CHECKSUM_NONE;
 	} else {

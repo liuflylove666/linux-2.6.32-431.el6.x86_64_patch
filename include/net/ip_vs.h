@@ -254,6 +254,7 @@ struct ip_vs_seq {
 	__u32			delta;		/* Delta in sequence numbers */
 	__u32			previous_delta;	/* Delta in sequence numbers
 						   before last resized pkt */
+	__u32 			fdata_seq;	/* sequence of first data packet */
 };
 
 
@@ -265,15 +266,15 @@ struct ip_vs_estimator {
 
 	u64			last_inbytes;
 	u64			last_outbytes;
-	u32			last_conns;
-	u32			last_inpkts;
-	u32			last_outpkts;
+	u64			last_conns;
+	u64			last_inpkts;
+	u64			last_outpkts;
 
 	u32			cps;
 	u32			inpps;
 	u32			outpps;
-	u32			inbps;
-	u32			outbps;
+	u64			inbps;
+	u64			outbps;
 };
 
 struct ip_vs_stats
@@ -313,7 +314,7 @@ struct ip_vs_protocol {
 		       struct ip_vs_protocol *pp,
 		       const struct ip_vs_iphdr *iph,
 		       unsigned int proto_off,
-		       int inverse);
+		       int inverse, int *res_dir);
 
 	struct ip_vs_conn *
 	(*conn_out_get)(int af,
@@ -321,13 +322,21 @@ struct ip_vs_protocol {
 			struct ip_vs_protocol *pp,
 			const struct ip_vs_iphdr *iph,
 			unsigned int proto_off,
-			int inverse);
+			int inverse, int *res_dir);
 
 	int (*snat_handler)(struct sk_buff *skb,
 			    struct ip_vs_protocol *pp, struct ip_vs_conn *cp);
 
 	int (*dnat_handler)(struct sk_buff *skb,
 			    struct ip_vs_protocol *pp, struct ip_vs_conn *cp);
+
+	int (*fnat_in_handler) (struct sk_buff **skb_p,
+				struct ip_vs_protocol *pp, struct ip_vs_conn *cp);
+				
+
+	int (*fnat_out_handler) (struct sk_buff *skb,
+				struct ip_vs_protocol *pp, struct ip_vs_conn * cp);
+				 
 
 	int (*csum_check)(int af, struct sk_buff *skb,
 			  struct ip_vs_protocol *pp);
@@ -352,9 +361,38 @@ struct ip_vs_protocol {
 	void (*timeout_change)(struct ip_vs_protocol *pp, int flags);
 
 	int (*set_state_timeout)(struct ip_vs_protocol *pp, char *sname, int to);
+
+    void (*conn_expire_handler)(struct ip_vs_protocol *pp, struct ip_vs_conn *cp);
+				     
 };
 
 extern struct ip_vs_protocol * ip_vs_proto_get(unsigned short proto);
+
+
+/*
+ *      Connection Index Flags
+ */
+#define IP_VS_CIDX_F_OUT2IN     0x0001	/* packet director, OUTside2INside */
+#define IP_VS_CIDX_F_IN2OUT     0x0002	/* packet director, INside2OUTside */
+#define IP_VS_CIDX_F_DIR_MASK	0x0003	/* packet director mask */
+
+/*
+ *      Connection index in HASH TABLE, each connection has two index
+ */
+struct ip_vs_conn_idx {
+	struct list_head c_list;	/* hashed list heads */
+
+	u16 				af;			/* address family */
+	__u16 				protocol;		/* Which protocol (TCP/UDP) */
+	union nf_inet_addr  s_addr;		/* source address */
+	union nf_inet_addr  d_addr;		/* destination address */
+	__be16 				s_port;		/* source port */
+	__be16 				d_port;		/* destination port */
+
+	struct ip_vs_conn 	*cp;	/* point to connection */
+	volatile __u16 		flags;	/* status flags */
+};
+
 
 struct ip_vs_conn_param {
 	const union nf_inet_addr	*caddr;
@@ -373,12 +411,16 @@ struct ip_vs_conn_param {
  *	IP_VS structure allocated for each dynamically scheduled connection
  */
 struct ip_vs_conn {
-	struct list_head        c_list;         /* hashed list heads */
+	struct ip_vs_conn_idx 	 *in_idx;	/* client-vs hash index */
+	struct ip_vs_conn_idx 	 *out_idx;	/* rs-vs hash index */
+
 
 	/* Protocol, addresses and port numbers */
 	u16                      af;		/* address family */
+	__u16                    protocol;       /* Which protocol (TCP/UDP) */
 	union nf_inet_addr       caddr;          /* client address */
 	union nf_inet_addr       vaddr;          /* virtual address */
+	union nf_inet_addr 		 laddr;			 /* local address */
 	union nf_inet_addr       daddr;          /* destination address */
 /* kABI fix for commit 3575792 (ipvs: extend connection flags to 32 bits)
  * and commit 0e051e6 (IPVS: Backup, Prepare for transferring firewall marks...)
@@ -389,8 +431,9 @@ struct ip_vs_conn {
 #endif
 	__be16                   cport;
 	__be16                   vport;
+	__be16 					 lport;
 	__be16                   dport;
-	__u16                   protocol;       /* Which protocol (TCP/UDP) */
+
 
 	/* counter and timer */
 	atomic_t		refcnt;		/* reference count */
@@ -416,7 +459,11 @@ struct ip_vs_conn {
 	struct ip_vs_conn       *control;       /* Master control connection */
 	atomic_t                n_control;      /* Number of controlled ones */
 	struct ip_vs_dest       *dest;          /* real server */
+	struct ip_vs_laddr 		*local;			/* local address */
 	atomic_t                in_pkts;        /* incoming packet counter */
+
+	struct ip_vs_seq fnat_seq;    	/* for fullnat */
+
 
 	/* packet transmitter for different forwarding methods.  If it
 	   mangles the packet, it must return NF_DROP or better NF_STOLEN,
@@ -432,6 +479,23 @@ struct ip_vs_conn {
 	void                    *app_data;      /* Application private data */
 	struct ip_vs_seq        in_seq;         /* incoming seq. struct */
 	struct ip_vs_seq        out_seq;        /* outgoing seq. struct */
+
+	/* syn-proxy related members
+	 */
+	struct ip_vs_seq syn_proxy_seq;	/* seq. used in syn proxy */
+	struct sk_buff_head ack_skb;	/* ack skb, save in step2 */
+	struct sk_buff *syn_skb;	/* saved rs syn packet */
+	atomic_t syn_retry_max;	/* syn retransmition max count */
+
+	/* add for stopping ack storm */
+	__u32 last_seq;		/* seq of the last ack packet */
+	__u32 last_ack_seq;	/* ack seq of the last ack packet */
+	atomic_t dup_ack_cnt;	/* count of repeated ack packets */
+
+	/* for RST */
+	__u32 rs_end_seq;	/* end seq(seq+datalen) of the last ack packet from rs */
+	__u32 rs_ack_seq;	/* ack seq of the last ack packet from rs */
+
 
 #ifndef __GENKSYMS__
 	/* kABI fix of commit 8599928 (IPVS: Add struct ip_vs_pe)
@@ -484,6 +548,10 @@ struct ip_vs_dest_user_kern {
 };
 
 
+struct ip_vs_laddr_user_kern {
+	union nf_inet_addr addr;	/* ip address */
+};
+
 /*
  *	The information about the virtual service offered to the net
  *	and the forwarding entries
@@ -505,6 +573,14 @@ struct ip_vs_service {
 
 	struct list_head	destinations;  /* real server d-linked list */
 	__u32			num_dests;     /* number of servers */
+
+	/* for local ip address list, now only used in FULL NAT model */
+	struct list_head laddr_list;	/* local ip address list */
+	rwlock_t laddr_lock;	/* lock for protect curr_laddr */
+	__u32 num_laddrs;	/* number of local ip address */
+	struct list_head *curr_laddr;	/* laddr data list head */
+
+
 	struct ip_vs_stats      stats;         /* statistics for the service */
 	struct ip_vs_app	*inc;	  /* bind conns to this app inc */
 
@@ -565,6 +641,21 @@ struct ip_vs_dest {
 #endif
 #endif
 
+};
+
+
+/*
+ *	Local ip address object, now only used in FULL NAT model
+ */
+struct ip_vs_laddr {
+	struct list_head n_list;	/* for the local address in the service */
+	u16 				af;			/* address family */
+	union nf_inet_addr  addr;	/* ip address */
+	atomic64_t 			port;	/* port counts */
+	atomic_t 			refcnt;	/* reference count */
+
+	atomic64_t 			port_conflict;	/* conflict counts */
+	atomic_t 			conn_counts;	/* connects counts */
 };
 
 
@@ -669,6 +760,81 @@ struct ip_vs_app
 };
 
 
+
+#define TCPOPT_ADDR  200
+#define TCPOLEN_ADDR 8		/* |opcode|size|ip+port| = 1 + 1 + 6 */
+
+/*
+ * insert client ip in tcp option, now only support IPV4,
+ * must be 4 bytes alignment.
+ */
+struct ip_vs_tcpo_addr {
+	__u8 opcode;
+	__u8 opsize;
+	__u16 port;
+	__u32 addr;
+};
+
+/*
+ * statistics for FULLNAT and SYNPROXY
+ * in /proc/net/ip_vs_ext_stats
+ */
+enum {
+	FULLNAT_ADD_TOA_OK = 1,
+	FULLNAT_ADD_TOA_FAIL_LEN,
+	FULLNAT_ADD_TOA_FAIL_MEM,
+	FULLNAT_ADD_TOA_FAIL_PROTO,
+	FULLNAT_CONN_REUSED,
+	FULLNAT_CONN_REUSED_CLOSE,
+	FULLNAT_CONN_REUSED_TIMEWAIT,
+	FULLNAT_CONN_REUSED_FINWAIT,
+	FULLNAT_CONN_REUSED_CLOSEWAIT,
+	FULLNAT_CONN_REUSED_LASTACK,
+	FULLNAT_CONN_REUSED_ESTAB,
+	SYNPROXY_RS_ERROR,
+	SYNPROXY_NULL_ACK,
+	SYNPROXY_BAD_ACK,
+	SYNPROXY_OK_ACK,
+	SYNPROXY_SYN_CNT,
+	SYNPROXY_ACK_STORM,
+	SYNPROXY_SYNSEND_QLEN,
+	SYNPROXY_CONN_REUSED,
+	SYNPROXY_CONN_REUSED_CLOSE,
+	SYNPROXY_CONN_REUSED_TIMEWAIT,
+	SYNPROXY_CONN_REUSED_FINWAIT,
+	SYNPROXY_CONN_REUSED_CLOSEWAIT,
+	SYNPROXY_CONN_REUSED_LASTACK,
+	DEFENCE_IP_FRAG_DROP,
+	DEFENCE_TCP_DROP,
+	DEFENCE_UDP_DROP,
+	IP_VS_EXT_STAT_LAST
+};
+
+struct ip_vs_estats_entry {
+	char *name;
+	int entry;
+};
+
+#define IP_VS_ESTATS_ITEM(_name, _entry) { \
+        .name = _name,            \
+        .entry = _entry,          \
+}
+
+#define IP_VS_ESTATS_LAST {    \
+        NULL,           \
+        0,              \
+}
+
+struct ip_vs_estats_mib {
+	unsigned long mibs[IP_VS_EXT_STAT_LAST];
+};
+
+#define IP_VS_INC_ESTATS(mib, field)         \
+        (per_cpu_ptr(mib, smp_processor_id())->mibs[field]++)
+
+extern struct ip_vs_estats_mib *ip_vs_esmib;
+
+
 /*
  *      IPVS core functions
  *      (from ip_vs_core.c)
@@ -708,22 +874,22 @@ static inline void ip_vs_conn_fill_param(int af, int protocol,
 	p->pe_data = NULL;
 }
 
-struct ip_vs_conn *ip_vs_conn_in_get(const struct ip_vs_conn_param *p);
+struct ip_vs_conn *ip_vs_conn_get(const struct ip_vs_conn_param *p, int *res_dir);
 struct ip_vs_conn *ip_vs_ct_in_get(const struct ip_vs_conn_param *p);
 
 struct ip_vs_conn * ip_vs_conn_in_get_proto(int af, const struct sk_buff *skb,
 					    struct ip_vs_protocol *pp,
 					    const struct ip_vs_iphdr *iph,
 					    unsigned int proto_off,
-					    int inverse);
+					    int inverse, int *res_dir);
 
-struct ip_vs_conn *ip_vs_conn_out_get(const struct ip_vs_conn_param *p);
+// struct ip_vs_conn *ip_vs_conn_out_get(const struct ip_vs_conn_param *p);
 
 struct ip_vs_conn * ip_vs_conn_out_get_proto(int af, const struct sk_buff *skb,
 					     struct ip_vs_protocol *pp,
 					     const struct ip_vs_iphdr *iph,
 					     unsigned int proto_off,
-					     int inverse);
+					     int inverse, int *res_dir);
 
 /* put back the conn without restarting its timer */
 static inline void __ip_vs_conn_put(struct ip_vs_conn *cp)
@@ -736,7 +902,8 @@ extern void ip_vs_conn_fill_cport(struct ip_vs_conn *cp, __be16 cport);
 struct ip_vs_conn *ip_vs_conn_new(const struct ip_vs_conn_param *p,
 				  const union nf_inet_addr *daddr,
 				  __be16 dport, unsigned flags,
-				  struct ip_vs_dest *dest, __u32 fwmark);
+				  struct ip_vs_dest *dest, __u32 fwmark,
+				  struct sk_buff *mskb, int is_synproxy_on);
 extern void ip_vs_conn_expire_now(struct ip_vs_conn *cp);
 
 extern const char * ip_vs_state_name(__u16 proto, int state);
@@ -881,7 +1048,7 @@ extern int ip_vs_unbind_scheduler(struct ip_vs_service *svc);
 extern struct ip_vs_scheduler *ip_vs_scheduler_get(const char *sched_name);
 extern void ip_vs_scheduler_put(struct ip_vs_scheduler *scheduler);
 extern struct ip_vs_conn *
-ip_vs_schedule(struct ip_vs_service *svc, struct sk_buff *skb);
+ip_vs_schedule(struct ip_vs_service *svc, struct sk_buff *skb, int is_synproxy_on);
 extern int ip_vs_leave(struct ip_vs_service *svc, struct sk_buff *skb,
 			struct ip_vs_protocol *pp);
 
@@ -896,6 +1063,19 @@ extern int sysctl_ip_vs_sync_threshold[2];
 extern int sysctl_ip_vs_nat_icmp_send;
 extern struct ip_vs_stats ip_vs_stats;
 extern const struct ctl_path net_vs_ctl_path[];
+
+extern int sysctl_ip_vs_timestamp_remove_entry;
+extern int sysctl_ip_vs_mss_adjust_entry;
+extern int sysctl_ip_vs_conn_reused_entry;
+extern int sysctl_ip_vs_toa_entry;
+extern int sysctl_ip_vs_lport_max;
+extern int sysctl_ip_vs_lport_min;
+extern int sysctl_ip_vs_lport_tries;
+extern int sysctl_ip_vs_frag_drop_entry;
+extern int sysctl_ip_vs_tcp_drop_entry;
+extern int sysctl_ip_vs_udp_drop_entry;
+extern int sysctl_ip_vs_conn_expire_tcp_rst;
+
 extern int sysctl_ip_vs_sync_ver;
 extern int sysctl_ip_vs_sync_qlen_max;
 extern int sysctl_ip_vs_sync_sock_size;
@@ -984,6 +1164,9 @@ extern struct ip_vs_service *
 ip_vs_service_get(int af, __u32 fwmark, __u16 protocol,
 		  const union nf_inet_addr *vaddr, __be16 vport);
 
+extern struct ip_vs_service *
+ip_vs_lookup_vip(int af, __u16 protocol, const union nf_inet_addr *vaddr);
+
 static inline void ip_vs_service_put(struct ip_vs_service *svc)
 {
 	atomic_dec(&svc->usecnt);
@@ -1003,6 +1186,8 @@ ip_vs_find_dest(int af, const union nf_inet_addr *daddr, __be16 dport,
 		__u32 fwmark, __u32 flags);
 extern struct ip_vs_dest *ip_vs_try_bind_dest(struct ip_vs_conn *cp);
 
+extern void ip_vs_laddr_hold(struct ip_vs_laddr *addr);
+extern void ip_vs_laddr_put(struct ip_vs_laddr *addr);
 
 /*
  *      IPVS sync daemon data and function prototypes
@@ -1027,6 +1212,17 @@ extern void ip_vs_new_estimator(struct ip_vs_stats *stats);
 extern void ip_vs_kill_estimator(struct ip_vs_stats *stats);
 extern void ip_vs_zero_estimator(struct ip_vs_stats *stats);
 
+
+/*
+ *	Lookup route table
+ */
+extern struct rtable *ip_vs_get_rt(struct sk_buff *skb, union nf_inet_addr *addr, u32 rtos);
+
+#ifdef CONFIG_IP_VS_IPV6
+extern struct rt6_info *ip_vs_get_rt_v6(struct sk_buff *skb, union nf_inet_addr *addr);
+#endif
+
+
 /*
  *	Various IPVS packet transmitters (from ip_vs_xmit.c)
  */
@@ -1036,6 +1232,8 @@ extern int ip_vs_bypass_xmit
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
 extern int ip_vs_nat_xmit
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
+extern int ip_vs_fnat_xmit
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
 extern int ip_vs_tunnel_xmit
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
 extern int ip_vs_dr_xmit
@@ -1044,10 +1242,22 @@ extern int ip_vs_icmp_xmit
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int offset);
 extern void ip_vs_dst_reset(struct ip_vs_dest *dest);
 
+extern int ip_vs_normal_response_xmit
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+extern int ip_vs_fnat_response_xmit
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+extern int ip_vs_normal_response_icmp_xmit
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
+extern int ip_vs_fnat_response_icmp_xmit
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
+
+
 #ifdef CONFIG_IP_VS_IPV6
 extern int ip_vs_bypass_xmit_v6
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
 extern int ip_vs_nat_xmit_v6
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
+extern int ip_vs_fnat_xmit_v6
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
 extern int ip_vs_tunnel_xmit_v6
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp);
@@ -1056,6 +1266,14 @@ extern int ip_vs_dr_xmit_v6
 extern int ip_vs_icmp_xmit_v6
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp,
  int offset);
+extern int ip_vs_normal_response_xmit_v6
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+extern int ip_vs_fnat_response_xmit_v6
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+extern int ip_vs_normal_response_icmp_xmit_v6
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
+extern int ip_vs_fnat_response_icmp_xmit_v6
+(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
 #endif
 
 /*
@@ -1094,19 +1312,15 @@ static inline char ip_vs_fwd_tag(struct ip_vs_conn *cp)
 		fwd = 'R'; break;
 	case IP_VS_CONN_F_BYPASS:
 		fwd = 'B'; break;
+	case IP_VS_CONN_F_FULLNAT:
+		fwd = 'F'; break;
 	default:
 		fwd = '?'; break;
 	}
 	return fwd;
 }
 
-extern void ip_vs_nat_icmp(struct sk_buff *skb, struct ip_vs_protocol *pp,
-			   struct ip_vs_conn *cp, int dir);
 
-#ifdef CONFIG_IP_VS_IPV6
-extern void ip_vs_nat_icmp_v6(struct sk_buff *skb, struct ip_vs_protocol *pp,
-			      struct ip_vs_conn *cp, int dir);
-#endif
 
 extern __sum16 ip_vs_checksum_complete(struct sk_buff *skb, int offset);
 
