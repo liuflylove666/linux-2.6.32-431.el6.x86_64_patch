@@ -38,6 +38,7 @@
 
 #include <net/net_namespace.h>
 #include <net/ip_vs.h>
+#include <net/ip_vs_synproxy.h>
 
 
 #ifndef CONFIG_IP_VS_TAB_BITS
@@ -133,19 +134,19 @@ static inline void ct_write_unlock_bh(unsigned key)
  *	Returns hash value for IPVS connection entry
  */
 static unsigned int ip_vs_conn_hashkey(int af,
-				       const union nf_inet_addr *s_addr, __be16 s_port,
-				       const union nf_inet_addr *d_addr, __be16 d_port)
+				       const union nf_inet_addr *caddr, __be16 cport,
+				       const union nf_inet_addr *daddr, __be16 dport)
 {
 #ifdef CONFIG_IP_VS_IPV6
 	if (af == AF_INET6)
-		return jhash_3words(jhash(s_addr, 16, ip_vs_conn_rnd),
-							jhash(d_addr, 16, ip_vs_conn_rnd),
-				    ((__force u32)s_port) << 16 | (__force u32)d_port,
+		return jhash_3words(jhash(caddr, 16, ip_vs_conn_rnd),
+							jhash(daddr, 16, ip_vs_conn_rnd),
+				    ((__force u32)cport) << 16 | (__force u32)dport,
 				    ip_vs_conn_rnd)
 			& ip_vs_conn_tab_mask;
 #endif
-	return jhash_3words((__force u32)s_addr->ip, (__force u32)d_addr->ip,
-				((__force u32)s_port) << 16 | (__force u32)d_port,
+	return jhash_3words((__force u32)caddr->ip, (__force u32)daddr->ip,
+				((__force u32)cport) << 16 | (__force u32)dport,
 			    ip_vs_conn_rnd)
 		& ip_vs_conn_tab_mask;
 }
@@ -373,9 +374,9 @@ __ip_vs_conn_get(const struct ip_vs_conn_param *p, int *res_dir)
 	list_for_each_entry(cidx, &ip_vs_conn_tab[hash], c_list) {
 		cp = cidx->cp;
 		if (cidx->af == p->af &&
-		    ip_vs_addr_equal(p->af, p->caddr, &cidx->s_addr) &&
-		    ip_vs_addr_equal(p->af, p->vaddr, &cidx->d_addr) &&
-		    p->cport == cidx->s_port && p->vport == cidx->d_port &&
+		    ip_vs_addr_equal(p->af, p->caddr, &cidx->caddr) &&
+		    ip_vs_addr_equal(p->af, p->vaddr, &cidx->daddr) &&
+		    p->cport == cidx->cport && p->vport == cidx->dport &&
 		    ((!p->cport)^(!(cp->flags & IP_VS_CONN_F_NO_CPORT))) &&
 		    p->protocol == cidx->protocol) {
 			/* HIT */
@@ -469,12 +470,12 @@ struct ip_vs_conn *ip_vs_ct_in_get(const struct ip_vs_conn_param *p)
 		}
 
 		if (cidx->af == p->af &&
-		    ip_vs_addr_equal(p->af, p->caddr, &cidx->s_addr) &&
+		    ip_vs_addr_equal(p->af, p->caddr, &cidx->caddr) &&
 		    /* protocol should only be IPPROTO_IP if
 		     * p->vaddr is a fwmark */
 		    ip_vs_addr_equal(p->protocol == IPPROTO_IP ? AF_UNSPEC :
-				     p->af, p->vaddr, &cidx->d_addr) &&
-		    p->cport == cidx->s_port && p->vport == cidx->d_port &&
+				     p->af, p->vaddr, &cidx->daddr) &&
+		    p->cport == cidx->cport && p->vport == cidx->dport &&
 		    cp->flags & IP_VS_CONN_F_TEMPLATE &&
 		    p->protocol == cidx->protocol)
 			goto out;
@@ -842,8 +843,8 @@ static inline int ip_vs_hbind_laddr(struct ip_vs_conn *cp)
 	case IP_VS_CONN_F_DROUTE:
 	case IP_VS_CONN_F_LOCALNODE:
 	case IP_VS_CONN_F_BYPASS:
-		ip_vs_addr_copy(cp->af, &cp->out_idx->d_addr, &cp->caddr);
-		cp->out_idx->d_port = cp->cport;
+		ip_vs_addr_copy(cp->af, &cp->out_idx->daddr, &cp->caddr);
+		cp->out_idx->dport = cp->cport;
 		ip_vs_addr_copy(cp->af, &cp->laddr, &cp->caddr);
 		cp->lport = cp->cport;
 		cp->local = NULL;
@@ -853,8 +854,8 @@ static inline int ip_vs_hbind_laddr(struct ip_vs_conn *cp)
 	}
 
 	if (cp->flags & IP_VS_CONN_F_TEMPLATE) {
-		ip_vs_addr_copy(cp->af, &cp->out_idx->d_addr, &cp->caddr);
-		cp->out_idx->d_port = cp->cport;
+		ip_vs_addr_copy(cp->af, &cp->out_idx->daddr, &cp->caddr);
+		cp->out_idx->dport = cp->cport;
 		ip_vs_addr_copy(cp->af, &cp->laddr, &cp->caddr);
 		cp->lport = cp->cport;
 		cp->local = NULL;
@@ -875,7 +876,7 @@ static inline int ip_vs_hbind_laddr(struct ip_vs_conn *cp)
 
 		/* increase the refcnt counter of the local address */
 		ip_vs_laddr_hold(local);
-		ip_vs_addr_copy(cp->af, &cp->out_idx->d_addr, &local->addr);
+		ip_vs_addr_copy(cp->af, &cp->out_idx->daddr, &local->addr);
 		ip_vs_addr_copy(cp->af, &cp->laddr, &local->addr);
 		remaining = sysctl_ip_vs_lport_max - sysctl_ip_vs_lport_min + 1;
 		for (i = 0; i < sysctl_ip_vs_lport_tries; i++) {
@@ -883,7 +884,7 @@ static inline int ip_vs_hbind_laddr(struct ip_vs_conn *cp)
 			tport =
 			    sysctl_ip_vs_lport_min +
 			    atomic64_inc_return(&local->port) % remaining;
-			cp->out_idx->d_port = cp->lport = htons(tport);
+			cp->out_idx->dport = cp->lport = htons(tport);
 
 			/* init hit everytime before lookup the tuple */
 			hit = 0;
@@ -901,11 +902,11 @@ static inline int ip_vs_hbind_laddr(struct ip_vs_conn *cp)
 					    c_list) {
 				if (cidx->af == cp->af
 				    && ip_vs_addr_equal(cp->af, &cp->daddr,
-							&cidx->s_addr)
+							&cidx->caddr)
 				    && ip_vs_addr_equal(cp->af, &cp->laddr,
-							&cidx->d_addr)
-				    && cp->dport == cidx->s_port
-				    && cp->lport == cidx->d_port
+							&cidx->daddr)
+				    && cp->dport == cidx->cport
+				    && cp->lport == cidx->dport
 				    && cp->protocol == cidx->protocol) {
 					/* HIT */
 					atomic64_inc(&local->port_conflict);
@@ -1056,6 +1057,7 @@ static void ip_vs_conn_expire(unsigned long data)
 	struct ip_vs_conn *cp = (struct ip_vs_conn *)data;
 	struct sk_buff *tmp_skb = NULL;
 	struct ip_vs_protocol *pp = ip_vs_proto_get(cp->protocol);
+        int retry_idx = 0;    /* fix synproxy timeout add by panxiaodong@xiaomi.com */
 
 
 	/*
@@ -1082,6 +1084,9 @@ static void ip_vs_conn_expire(unsigned long data)
 	spin_lock(&cp->lock);
 	if (cp->syn_skb != NULL && atomic_read(&cp->syn_retry_max) > 0) {
 		atomic_dec(&cp->syn_retry_max);
+                /* fix synproxy timeout add by panxiaodong@xiaomi.com */
+                retry_idx = sysctl_ip_vs_synproxy_syn_retry - atomic_read(&cp->syn_retry_max);
+                cp->timeout *= (1<<retry_idx);
 		if (cp->packet_xmit) {
 			tmp_skb = skb_copy(cp->syn_skb, GFP_ATOMIC);
 			cp->packet_xmit(tmp_skb, cp, pp);
@@ -1200,10 +1205,10 @@ ip_vs_conn_new(const struct ip_vs_conn_param *p,
 	INIT_LIST_HEAD(&ci_idx->c_list);
 	ci_idx->af		   = p->af;
 	ci_idx->protocol	   = p->protocol;
-	ip_vs_addr_copy(p->af, &ci_idx->s_addr, p->caddr);
-	ci_idx->s_port	   = p->cport;
-	ip_vs_addr_copy(p->af, &ci_idx->d_addr, p->vaddr);
-	ci_idx->d_port	   = p->vport;
+	ip_vs_addr_copy(p->af, &ci_idx->caddr, p->caddr);
+	ci_idx->cport	   = p->cport;
+	ip_vs_addr_copy(p->af, &ci_idx->daddr, p->vaddr);
+	ci_idx->dport	   = p->vport;
 	ci_idx->flags |= IP_VS_CIDX_F_OUT2IN;
 	ci_idx->cp = cp;
 
@@ -1215,8 +1220,8 @@ ip_vs_conn_new(const struct ip_vs_conn_param *p,
 	co_idx->af		   = p->af;
 	co_idx->protocol	   = p->protocol;
 	ip_vs_addr_copy(p->protocol == IPPROTO_IP ? AF_UNSPEC : p->af,
-			&co_idx->s_addr, daddr);
-	co_idx->s_port = dport;
+			&co_idx->caddr, daddr);
+	co_idx->cport = dport;
 	co_idx->flags |= IP_VS_CIDX_F_IN2OUT;
 	co_idx->cp = cp;
 

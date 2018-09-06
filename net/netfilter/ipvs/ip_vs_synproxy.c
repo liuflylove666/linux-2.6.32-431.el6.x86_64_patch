@@ -104,8 +104,7 @@ syn_proxy_parse_set_opts(struct sk_buff *skb, struct tcphdr *th,
                             IP_VS_DBG(6,
                                   "tcp_parse_options: Illegal window "
                                   "scaling value %d > %d received.",
-                                  opt->
-                                  snd_wscale,
+                                  opt->snd_wscale,
                                   IP_VS_SYNPROXY_WSCALE_MAX);
                             opt->snd_wscale =
                                 IP_VS_SYNPROXY_WSCALE_MAX;
@@ -210,8 +209,7 @@ syn_proxy_reuse_skb(int af, struct sk_buff *skb, struct ip_vs_synproxy_opt *opt)
 
         th->check = 0;
         skb->csum = skb_checksum(skb, tcphoff, skb->len - tcphoff, 0);
-        th->check = csum_ipv6_magic(&iph->saddr, &iph->daddr,
-                        skb->len - tcphoff,
+        th->check = csum_ipv6_magic(&iph->saddr, &iph->daddr, skb->len - tcphoff,
                         IPPROTO_TCP, skb->csum);
     } else
 #endif
@@ -263,9 +261,7 @@ ip_vs_synproxy_syn_rcv(int af, struct sk_buff *skb,
     }
 
     if (th->syn && !th->ack && !th->rst && !th->fin &&
-        (svc =
-         ip_vs_service_get(af, skb->mark, iph->protocol, &iph->daddr,
-                   th->dest))
+        (svc = ip_vs_service_get(af, skb->mark, iph->protocol, &iph->daddr, th->dest))
         && (svc->flags & IP_VS_CONN_F_SYNPROXY)) {
         // release service here, because don't use it any all.
         ip_vs_service_put(svc);
@@ -323,7 +319,7 @@ ip_vs_synproxy_syn_rcv(int af, struct sk_buff *skb,
     dev_queue_xmit(skb);
     *verdict = NF_STOLEN;
     return 0;
-      syn_rcv_out:
+syn_rcv_out:
     /* Drop the packet when all things are right also,
      * then we needn't to kfree_skb() */
     *verdict = NF_DROP;
@@ -346,8 +342,7 @@ syn_proxy_ack_has_data(struct sk_buff *skb, struct ip_vs_iphdr *iph,
 static inline void
 syn_proxy_syn_build_options(__be32 * ptr, struct ip_vs_synproxy_opt *opt)
 {
-    *ptr++ =
-        htonl((TCPOPT_MSS << 24) | (TCPOLEN_MSS << 16) | opt->mss_clamp);
+    *ptr++ = htonl((TCPOPT_MSS << 24) | (TCPOLEN_MSS << 16) | opt->mss_clamp);
     if (opt->tstamp_ok) {
         if (opt->sack_ok)
             *ptr++ = htonl((TCPOPT_SACK_PERM << 24) |
@@ -404,8 +399,7 @@ syn_proxy_send_rs_syn(int af, const struct tcphdr *th,
             (opt->tstamp_ok ? TCPOLEN_TSTAMP_ALIGNED : 0) +
             (opt->wscale_ok ? TCPOLEN_WSCALE_ALIGNED : 0) +
             /* SACK_PERM is in the place of NOP NOP of TS */
-            ((opt->sack_ok
-              && !opt->tstamp_ok) ? TCPOLEN_SACKPERM_ALIGNED : 0));
+            ((opt->sack_ok && !opt->tstamp_ok) ? TCPOLEN_SACKPERM_ALIGNED : 0));
 
     new_th = (struct tcphdr *)skb_push(syn_skb, tcp_hdr_size);
     /* Compose tcp header */
