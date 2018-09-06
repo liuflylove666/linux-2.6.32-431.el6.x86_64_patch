@@ -79,7 +79,7 @@ __mtu_check_toobig_v6(const struct sk_buff *skb, u32 mtu)
 static struct rtable *
 __ip_vs_get_out_rt(struct sk_buff *skb, struct ip_vs_conn *cp, u32 rtos)
 {
-	// struct net *net = dev_net(skb->dev);
+	struct net *net = dev_net(skb->dev);
 	struct rtable *rt;			/* Route to the other host */
 	struct ip_vs_dest *dest = cp->dest;
 
@@ -96,7 +96,7 @@ __ip_vs_get_out_rt(struct sk_buff *skb, struct ip_vs_conn *cp, u32 rtos)
 						.tos = rtos, } },
 			};
 
-			if (ip_route_output_key(&init_net, &rt, &fl)) {
+			if (ip_route_output_key(net, &rt, &fl)) {
 				spin_unlock(&dest->dst_lock);
 				IP_VS_DBG_RL("ip_route_output error, dest: %pI4\n",
 					     &dest->addr.ip);
@@ -118,7 +118,7 @@ __ip_vs_get_out_rt(struct sk_buff *skb, struct ip_vs_conn *cp, u32 rtos)
 					.tos = rtos, } },
 		};
 
-		if (ip_route_output_key(&init_net, &rt, &fl)) {
+		if (ip_route_output_key(net, &rt, &fl)) {
 			IP_VS_DBG_RL("ip_route_output error, dest: %pI4\n",
 				     &cp->daddr.ip);
 			return NULL;
@@ -131,6 +131,7 @@ __ip_vs_get_out_rt(struct sk_buff *skb, struct ip_vs_conn *cp, u32 rtos)
 
 struct rtable *ip_vs_get_rt(struct sk_buff *skb, union nf_inet_addr *addr, u32 rtos)
 {
+	struct net *net = dev_net(skb->dev);
 	struct rtable *rt;	/* Route to the other host */
 
 	struct flowi fl = {
@@ -142,7 +143,7 @@ struct rtable *ip_vs_get_rt(struct sk_buff *skb, union nf_inet_addr *addr, u32 r
 				   .tos = rtos,}},
 	};
 
-	if (ip_route_output_key(&init_net, &rt, &fl)) {
+	if (ip_route_output_key(net, &rt, &fl)) {
 		IP_VS_DBG_RL("ip_route_output error, dest: %pI4\n", &addr->ip);
 		return NULL;
 	}
@@ -191,7 +192,7 @@ static struct rt6_info *
 __ip_vs_get_out_rt_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 		      struct in6_addr *ret_saddr, int do_xfrm)
 {
-	// struct net *net = dev_net(skb->dev);
+	struct net *net = dev_net(skb->dev);
 	struct rt6_info *rt;			/* Route to the other host */
 	struct ip_vs_dest *dest = cp->dest;
 	struct dst_entry *dst;
@@ -202,7 +203,7 @@ __ip_vs_get_out_rt_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 		if (!rt) {
 			u32 cookie;
 
-			dst = __ip_vs_route_output_v6(&init_net, &dest->addr.in6,
+			dst = __ip_vs_route_output_v6(net, &dest->addr.in6,
 						      &dest->dst_saddr,
 						      do_xfrm);
 			if (!dst) {
@@ -220,7 +221,7 @@ __ip_vs_get_out_rt_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 			ipv6_addr_copy(ret_saddr, &dest->dst_saddr);
 		spin_unlock(&dest->dst_lock);
 	} else {
-		dst = __ip_vs_route_output_v6(&init_net, &cp->daddr.in6, ret_saddr,
+		dst = __ip_vs_route_output_v6(net, &cp->daddr.in6, ret_saddr,
 					      do_xfrm);
 		if (!dst)
 			return NULL;
@@ -232,6 +233,7 @@ __ip_vs_get_out_rt_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 
 struct rt6_info *ip_vs_get_rt_v6(struct sk_buff *skb, union nf_inet_addr *addr)
 {
+	struct net *net = dev_net(skb->dev);
 	struct rt6_info *rt;	/* Route to the other host */
 
 	struct flowi fl = {
@@ -246,7 +248,7 @@ struct rt6_info *ip_vs_get_rt_v6(struct sk_buff *skb, union nf_inet_addr *addr)
 			 },
 	};
 
-	rt = (struct rt6_info *)ip6_route_output(&init_net, NULL, &fl);
+	rt = (struct rt6_info *)ip6_route_output(net, NULL, &fl);
 	if (!rt) {
 		IP_VS_DBG_RL("ip6_route_output error, dest: %pI6\n",
 			     &addr->in6);

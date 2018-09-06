@@ -485,6 +485,7 @@ syn_proxy_send_rs_syn(int af, const struct tcphdr *th,
     }
 
     /* If xmit failed, syn_skb will be freed correctly. */
+    syn_skb->dev = skb->dev;
     cp->packet_xmit(syn_skb, cp, pp);
 
     return 1;
@@ -800,6 +801,7 @@ ip_vs_synproxy_synack_rcv(struct sk_buff *skb, struct ip_vs_conn *cp,
 
         while ((tmp_skb = skb_dequeue(&save_skb)) != NULL) {
             /* If xmit failed, syn_skb will be freed correctly. */
+            tmp_skb->dev = skb->dev;
             cp->packet_xmit(tmp_skb, cp, pp);
         }
 
