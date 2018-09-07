@@ -2361,7 +2361,7 @@ static inline const char *ip_vs_fwd_name(unsigned flags)
 	case IP_VS_CONN_F_DROUTE:
 		return "Route";
 	case IP_VS_CONN_F_FULLNAT:
-		return "FullNat";
+		return "FNAT";
 	default:
 		return "Masq";
 	}
