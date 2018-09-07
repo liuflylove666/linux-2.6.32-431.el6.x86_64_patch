@@ -590,21 +590,18 @@ static int handle_response_icmp(int af, struct sk_buff *skb,
 	if (IP_VS_FWD_METHOD(cp) == IP_VS_CONN_F_FULLNAT) {
 #ifdef CONFIG_IP_VS_IPV6
 		if (af == AF_INET6)
-			verdict = ip_vs_fnat_response_icmp_xmit_v6(skb, pp, cp,
-							     offset);
+			verdict = ip_vs_fnat_response_icmp_xmit_v6(skb, cp, pp, offset);
 		else
 #endif
-			verdict = ip_vs_fnat_response_icmp_xmit(skb, pp, cp, offset);
+			verdict = ip_vs_fnat_response_icmp_xmit(skb, cp, pp, offset);
 
 	} else {
 #ifdef CONFIG_IP_VS_IPV6
 		if (af == AF_INET6)
-			verdict = ip_vs_normal_response_icmp_xmit_v6(skb, pp, cp,
-							       offset);
+			verdict = ip_vs_normal_response_icmp_xmit_v6(skb, cp, pp, offset);
 		else
 #endif
-			verdict = ip_vs_normal_response_icmp_xmit(skb, pp, cp,
-							    offset);
+			verdict = ip_vs_normal_response_icmp_xmit(skb, cp, pp, offset);
 	}
 
 out:
@@ -821,20 +818,20 @@ handle_response(int af, struct sk_buff *skb, struct ip_vs_protocol *pp,
 	if (cp->flags & IP_VS_CONN_F_FULLNAT) {
 #ifdef CONFIG_IP_VS_IPV6
 	if (af == AF_INET6) {
-		ret = ip_vs_fnat_response_xmit_v6(skb, pp, cp, ihl);
+		ret = ip_vs_fnat_response_xmit_v6(skb, cp, pp, ihl);
 	} else
 #endif
 		{
-			ret = ip_vs_fnat_response_xmit(skb, pp, cp, ihl);
+			ret = ip_vs_fnat_response_xmit(skb, cp, pp, ihl);
 		}
 	} else {
 #ifdef CONFIG_IP_VS_IPV6
 	if (af == AF_INET6) {
-		ret = ip_vs_normal_response_xmit_v6(skb, pp, cp, ihl);
+		ret = ip_vs_normal_response_xmit_v6(skb, cp, pp, ihl);
 	} else
 #endif
 		{
-			ret = ip_vs_normal_response_xmit(skb, pp, cp, ihl);
+			ret = ip_vs_normal_response_xmit(skb, cp, pp, ihl);
 		}
 	}
 
@@ -1402,6 +1399,8 @@ ip_vs_pre_routing(unsigned int hooknum, struct sk_buff *skb,
 	/* synproxy: defence synflood */
 	if (iph.protocol == IPPROTO_TCP) {
 		int v = NF_ACCEPT;
+		// IP_VS_ERR_RL("lcb--000001:%d \n", skb->dev->ifindex);
+		IP_VS_ERR_RL("lcb--000001:%s \n", skb->dev->name);
 		if (0 == ip_vs_synproxy_syn_rcv(af, skb, &iph, &v)) {
 			return v;
 		}

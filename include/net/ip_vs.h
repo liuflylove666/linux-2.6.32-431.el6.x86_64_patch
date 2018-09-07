@@ -1242,13 +1242,13 @@ extern int ip_vs_icmp_xmit
 extern void ip_vs_dst_reset(struct ip_vs_dest *dest);
 
 extern int ip_vs_normal_response_xmit
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int ihl);
 extern int ip_vs_fnat_response_xmit
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int ihl);
 extern int ip_vs_normal_response_icmp_xmit
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int offset);
 extern int ip_vs_fnat_response_icmp_xmit
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int offset);
 
 
 #ifdef CONFIG_IP_VS_IPV6
@@ -1266,13 +1266,13 @@ extern int ip_vs_icmp_xmit_v6
 (struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp,
  int offset);
 extern int ip_vs_normal_response_xmit_v6
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int ihl);
 extern int ip_vs_fnat_response_xmit_v6
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int ihl);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int ihl);
 extern int ip_vs_normal_response_icmp_xmit_v6
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int offset);
 extern int ip_vs_fnat_response_icmp_xmit_v6
-(struct sk_buff *skb, struct ip_vs_protocol *pp, struct ip_vs_conn *cp, int offset);
+(struct sk_buff *skb, struct ip_vs_conn *cp, struct ip_vs_protocol *pp, int offset);
 #endif
 
 /*

@@ -366,8 +366,6 @@ __ip_vs_conn_get(const struct ip_vs_conn_param *p, int *res_dir)
 	struct ip_vs_conn_idx *cidx;
 
 	hash = ip_vs_conn_hashkey_param(p, false);
-	// hash = ip_vs_conn_hashkey(p->af, p->caddr, p->cport, p->vaddr,
-	// 		       p->vport);
 
 	ct_read_lock(hash);
 

@@ -997,11 +997,9 @@ static void tcp_send_rst_out(struct ip_vs_protocol *pp, struct ip_vs_conn *cp)
 					    IPPROTO_TCP, skb->csum);
 
 		if (cp->flags & IP_VS_CONN_F_FULLNAT)
-			ip_vs_fnat_response_xmit_v6(skb, pp, cp,
-						    sizeof(struct ipv6hdr));
+			ip_vs_fnat_response_xmit_v6(skb, cp, pp, sizeof(struct ipv6hdr));
 		else
-			ip_vs_normal_response_xmit_v6(skb, pp, cp,
-						      sizeof(struct ipv6hdr));
+			ip_vs_normal_response_xmit_v6(skb, cp, pp, sizeof(struct ipv6hdr));
 	} else
 #endif
 	{
@@ -1028,9 +1026,9 @@ static void tcp_send_rst_out(struct ip_vs_protocol *pp, struct ip_vs_conn *cp)
 					      IPPROTO_TCP, skb->csum);
 
 		if (cp->flags & IP_VS_CONN_F_FULLNAT)
-			ip_vs_fnat_response_xmit(skb, pp, cp, iph->ihl << 2);
+			ip_vs_fnat_response_xmit(skb, cp, pp, iph->ihl << 2);
 		else
-			ip_vs_normal_response_xmit(skb, pp, cp, iph->ihl << 2);
+			ip_vs_normal_response_xmit(skb, cp, pp, iph->ihl << 2);
 	}
 }
 

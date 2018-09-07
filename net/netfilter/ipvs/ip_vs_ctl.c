@@ -1980,7 +1980,7 @@ static struct ctl_table vs_vars[] = {
 	},
 	{
 		.procname	= "timeout_lastack",
-		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_CLOSE_WAIT],
+		.data	= &sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_LAST_ACK],
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
