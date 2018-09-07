@@ -100,7 +100,7 @@ int sysctl_ip_vs_conn_reused_entry = 1;
 int sysctl_ip_vs_toa_entry = 1;
 static int ip_vs_entry_min = 0;
 static int ip_vs_entry_max = 1;
-extern int sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_LAST + 1];
+extern int sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_LAST+1];
 /*
  * sysctl for SYNPROXY
  */

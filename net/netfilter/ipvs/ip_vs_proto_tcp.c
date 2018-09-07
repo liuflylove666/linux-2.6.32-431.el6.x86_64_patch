@@ -1107,19 +1107,19 @@ static const int tcp_state_off[IP_VS_DIR_LAST] = {
 /*
  *	Timeout table[state]
  */
-int sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_LAST + 1] = {
-	[IP_VS_TCP_S_NONE] = 2 * HZ,
-	[IP_VS_TCP_S_ESTABLISHED] = 90 * HZ,
-	[IP_VS_TCP_S_SYN_SENT] = 3 * HZ,
-	[IP_VS_TCP_S_SYN_RECV] = 30 * HZ,
-	[IP_VS_TCP_S_FIN_WAIT] = 3 * HZ,
-	[IP_VS_TCP_S_TIME_WAIT] = 3 * HZ,
-	[IP_VS_TCP_S_CLOSE] = 3 * HZ,
-	[IP_VS_TCP_S_CLOSE_WAIT] = 3 * HZ,
-	[IP_VS_TCP_S_LAST_ACK] = 3 * HZ,
-	[IP_VS_TCP_S_LISTEN] = 2 * 60 * HZ,
-	[IP_VS_TCP_S_SYNACK] = 30 * HZ,
-	[IP_VS_TCP_S_LAST] = 2 * HZ,
+int sysctl_ip_vs_tcp_timeouts[IP_VS_TCP_S_LAST+1] = {
+        [IP_VS_TCP_S_NONE]              =       2*HZ,
+        [IP_VS_TCP_S_ESTABLISHED]       =       90*HZ,
+        [IP_VS_TCP_S_SYN_SENT]          =       3*HZ,
+        [IP_VS_TCP_S_SYN_RECV]          =       30*HZ,
+        [IP_VS_TCP_S_FIN_WAIT]          =       3*HZ,
+        [IP_VS_TCP_S_TIME_WAIT]         =       3*HZ,
+        [IP_VS_TCP_S_CLOSE]             =       3*HZ,
+        [IP_VS_TCP_S_CLOSE_WAIT]        =       3*HZ,
+        [IP_VS_TCP_S_LAST_ACK]          =       3*HZ,
+        [IP_VS_TCP_S_LISTEN]            =       2*60*HZ,
+        [IP_VS_TCP_S_SYNACK]            =       30*HZ,
+        [IP_VS_TCP_S_LAST]              =       2*HZ,
 };
 
 static const char *const tcp_state_name_table[IP_VS_TCP_S_LAST+1] = {
