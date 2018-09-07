@@ -380,14 +380,13 @@ extern struct ip_vs_protocol * ip_vs_proto_get(unsigned short proto);
  *      Connection index in HASH TABLE, each connection has two index
  */
 struct ip_vs_conn_idx {
-	struct list_head c_list;	/* hashed list heads */
-
-	u16 				af;			/* address family */
-	__u16 				protocol;		/* Which protocol (TCP/UDP) */
-	union nf_inet_addr  s_addr;		/* source address */
-	union nf_inet_addr  d_addr;		/* destination address */
-	__be16 				s_port;		/* source port */
-	__be16 				d_port;		/* destination port */
+	struct list_head 	c_list;		/* hashed list heads */
+	u16 			af;		/* address family */
+	__u16 			protocol;	/* Which protocol (TCP/UDP) */
+	union nf_inet_addr      caddr;		/* source address */
+	union nf_inet_addr      daddr;		/* destination address */
+	__be16 			cport;		/* source port */
+	__be16 			dport;		/* destination port */
 
 	struct ip_vs_conn 	*cp;	/* point to connection */
 	volatile __u16 		flags;	/* status flags */
@@ -416,11 +415,11 @@ struct ip_vs_conn {
 
 
 	/* Protocol, addresses and port numbers */
-	u16                      af;		/* address family */
+	u16                      af;		 /* address family */
 	__u16                    protocol;       /* Which protocol (TCP/UDP) */
 	union nf_inet_addr       caddr;          /* client address */
 	union nf_inet_addr       vaddr;          /* virtual address */
-	union nf_inet_addr 		 laddr;			 /* local address */
+	union nf_inet_addr 	 laddr;	         /* local address */
 	union nf_inet_addr       daddr;          /* destination address */
 /* kABI fix for commit 3575792 (ipvs: extend connection flags to 32 bits)
  * and commit 0e051e6 (IPVS: Backup, Prepare for transferring firewall marks...)
